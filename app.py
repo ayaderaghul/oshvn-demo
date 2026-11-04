@@ -4,7 +4,8 @@ Pages: documents · one document (Điều › Khoản) · keyword search · obli
 Environment: DATABASE_URL (role oshvn_web: reads tables; its only write is the review_proposal() function),
 APP_PASSWORD (HTTP Basic; the user name is recorded as the reviewer).
 """
-import difflib, hashlib, hmac, html, json, os, re, secrets
+import difflib, hashlib, hmac, html, json, math, os, re, secrets, threading, time, unicodedata, urllib.request
+from collections import Counter, deque
 from urllib.parse import quote
 from contextlib import contextmanager
 
@@ -62,7 +63,7 @@ ins{background:var(--oks);color:var(--ok);text-decoration:none;border-radius:3px
 details>summary{cursor:pointer;font-weight:600}textarea{font:inherit;width:100%;min-height:70px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink)}
 button.ghost{background:var(--code);color:var(--ink)}.err{background:var(--warns);color:var(--warn);padding:8px 12px;border-radius:8px}
 """
-NAV = [("/", "Văn bản"), ("/search", "Tìm kiếm"), ("/obligations", "Nghĩa vụ & rule engine"), ("/proposals", "Chờ duyệt"), ("/runs", "Nhật ký nạp")]
+NAV = [("/", "Văn bản"), ("/ask", "Hỏi thử"), ("/search", "Tìm kiếm"), ("/obligations", "Nghĩa vụ & rule engine"), ("/proposals", "Chờ duyệt"), ("/runs", "Nhật ký nạp")]
 
 
 def page(title, body, active="/"):
@@ -564,3 +565,144 @@ và được đánh dấu là đã được bạn duyệt — lần chạy agent
     if lg:
         out.append(f"<div class='panel'><details><summary>Nhật ký agent01 ({len(lg)} điều)</summary><ul style='font-size:.85rem'>" + "".join(f"<li>{E(x)}</li>" for x in lg) + "</ul></details></div>")
     return page(f"Đề xuất #{pid}", "".join(out), "/proposals")
+
+
+# ---------------------------------------------------------------- Hỏi thử (RAG): BM25 over all clauses + Claude answer with citations
+# Same retrieval as the tra cứu page: accent-insensitive, syllable unigrams + bigrams, BM25 (19/20 on the NĐ 39 question set).
+STOP = set("cac cua va la co cho duoc trong theo tai voi nhung mot khi thi de ve tu den nay do sau day phai ai gi nao the bao nhieu khong".split())
+
+
+def _norm(t):
+    t = unicodedata.normalize("NFD", t.lower().replace("đ", "d"))
+    return "".join(ch for ch in t if unicodedata.category(ch) != "Mn")
+
+
+def _tokens(t):
+    w = re.findall(r"[a-z0-9]+", _norm(t))
+    return [x for x in w if x not in STOP] + [a + "_" + b for a, b in zip(w, w[1:])]
+
+
+class Index:
+    """In-memory BM25 over every live clause. Rebuilt when the database changes (new load run)."""
+    def __init__(self):
+        self.lock, self.stamp, self.rows = threading.Lock(), None, []
+
+    def ensure(self, conn):
+        stamp = conn.execute("SELECT count(*), max(id) FROM chunks WHERE source_kind='legal_article' AND NOT coalesce(retired,false)").fetchone()
+        if stamp == self.stamp: return
+        with self.lock:
+            rows = conn.execute("""SELECT d.id, d.number, c.locator, c.text FROM chunks c JOIN legal_documents d ON d.id=c.document_id
+                                   WHERE c.source_kind='legal_article' AND NOT coalesce(c.retired,false)""").fetchall()
+            self.rows = rows
+            self.tf = [Counter(_tokens(r[3])) for r in rows]
+            self.len = [sum(t.values()) for t in self.tf]; self.avg = (sum(self.len) / len(self.len)) if rows else 1
+            df = Counter(t for tf in self.tf for t in tf); N = len(rows)
+            self.idf = {t: math.log(1 + (N - n + .5) / (n + .5)) for t, n in df.items()}
+            self.stamp = stamp
+
+    def search(self, q, k=12, k1=1.2, b=0.75):
+        qt = set(_tokens(q)); sc = []
+        for i, tf in enumerate(self.tf):
+            s = sum(self.idf[t] * tf[t] * (k1 + 1) / (tf[t] + k1 * (1 - b + b * self.len[i] / self.avg)) for t in qt if t in tf)
+            if s > 0: sc.append((s, i))
+        return [(s, self.rows[i]) for s, i in sorted(sc, reverse=True)[:k]]
+
+
+INDEX = Index()
+ASK_LOG = deque()   # timestamps of model calls, for the hourly limit
+
+
+def _ref(loc, num):
+    return f"{num} " + (loc.get("ref") or (loc.get("label") or f"Điều {loc.get('dieu')}") + (f", khoản {loc['khoan']}" if loc.get("khoan") else ""))
+
+
+def _numbers(t):
+    return re.findall(r"\d+(?:[/.,]\d+)*", t)
+
+
+def ask_claude(question, hits):
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key: return None, "Chưa đặt ANTHROPIC_API_KEY trên Render — chỉ hiện các khoản tìm được, chưa có câu trả lời."
+    limit = int(os.environ.get("ASK_LIMIT_PER_HOUR", "60"))
+    now = time.time()
+    while ASK_LOG and now - ASK_LOG[0] > 3600: ASK_LOG.popleft()
+    if len(ASK_LOG) >= limit: return None, f"Đã đủ {limit} câu hỏi trong một giờ (giới hạn ASK_LIMIT_PER_HOUR). Thử lại sau."
+    ASK_LOG.append(now)
+    sources = "\n\n".join(f"[{i + 1}] {_ref(h[1][2], h[1][1])}\n{h[1][3][:2500]}" for i, h in enumerate(hits))
+    user = (f"Câu hỏi của chuyên gia an toàn, vệ sinh lao động:\n{question}\n\nCác khoản luật tìm được (đánh số):\n{sources}\n\n"
+            "Trả lời bằng tiếng Việt, ngắn gọn, CHỈ dựa vào các khoản trên. Sau mỗi ý ghi số khoản làm căn cứ, ví dụ [2] hoặc [1][4]. "
+            "Mọi con số (thời hạn, số người, mức phạt) phải chép đúng từ khoản được dẫn. Nếu các khoản trên không đủ để trả lời, nói rõ "
+            "phần nào không tìm thấy căn cứ, không đoán. Lưu ý: mức phạt trong NĐ 283/2026 là mức cho cá nhân; tổ chức bị phạt gấp 2 lần, "
+            "trừ khi điều đó ghi rõ là tổ chức.\n"
+            'Trả JSON: {"answer": "...", "used": [số các khoản đã dẫn], "not_found": "phần không có căn cứ, hoặc rỗng"}')
+    model = os.environ.get("ASK_MODEL", "claude-sonnet-5-5")
+    body = {"model": model, "max_tokens": 2500, "system": "Bạn là trợ lý tra cứu pháp luật ATVSLĐ của OSHVN. Chỉ trả lời bằng một đối tượng JSON.",
+            "messages": [{"role": "user", "content": user}]}
+    base = os.environ.get("ASK_API_BASE", "https://api.anthropic.com")
+    req = urllib.request.Request(base + "/v1/messages", json.dumps(body).encode(),
+                                 {"Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01"})
+    try:
+        data = json.load(urllib.request.urlopen(req, timeout=90))
+    except urllib.error.HTTPError as e:
+        return None, f"Claude API báo lỗi {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"
+    except Exception as e:
+        return None, f"Không gọi được Claude API: {e}"
+    text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+    m = re.search(r"\{.*\}", text, re.S)
+    try:
+        out = json.loads(m.group(0) if m else text)
+    except json.JSONDecodeError:
+        return None, "Câu trả lời của model không đúng định dạng — thử lại."
+    u = data.get("usage", {}); out["_usage"] = (model, u.get("input_tokens", 0), u.get("output_tokens", 0))
+    return out, None
+
+
+@app.get("/ask", dependencies=[Depends(auth)])
+def ask(q: str = Query("", max_length=500), doc: str = Query("", max_length=40)):
+    with db() as conn:
+        INDEX.ensure(conn)
+        docs = [r[0] for r in conn.execute("SELECT DISTINCT d.number FROM legal_documents d JOIN chunks c ON c.document_id=d.id ORDER BY 1").fetchall()]
+    hits = []
+    if q.strip():
+        hits = INDEX.search(q, k=40)
+        if doc: hits = [h for h in hits if h[1][1] == doc]
+        hits = hits[:12]
+    opts = "".join(f"<option value='{E(d)}' {'selected' if d == doc else ''}>{E(d)}</option>" for d in docs)
+    body = [f"""<h1>Hỏi thử</h1><p class='muted'>Tìm các khoản liên quan trong toàn bộ văn bản đã nạp (BM25, không phân biệt dấu), rồi Claude trả lời
+<b>chỉ dựa trên các khoản đó</b>, kèm số khoản làm căn cứ. Dành cho chuyên gia kiểm tra chất lượng tra cứu — không phải tư vấn pháp lý.</p>
+<form class='row panel' method='get'><input name='q' value='{E(q)}' style='flex:1;min-width:260px' placeholder='ví dụ: công ty xây dựng 120 người có phải thành lập hội đồng ATVSLĐ không?'>
+<select name='doc'><option value=''>Mọi văn bản</option>{opts}</select><button>Hỏi</button></form>"""]
+    if not q.strip():
+        return page("Hỏi thử", "".join(body), "/ask")
+    if not hits:
+        body.append("<div class='panel'>Không tìm thấy khoản nào chứa các từ trong câu hỏi.</div>")
+        return page("Hỏi thử", "".join(body), "/ask")
+    out, err = ask_claude(q, hits)
+    if err:
+        body.append(f"<p class='err'>{E(err)}</p>")
+    if out:
+        used = [int(x) for x in out.get("used", []) if str(x).isdigit()]
+        cited = {int(x) for x in re.findall(r"\[(\d+)\]", out.get("answer", ""))} | set(used)
+        bad_cite = sorted(c for c in cited if c < 1 or c > len(hits))
+        src_nums = {n for c in cited if 1 <= c <= len(hits)
+                    for n in _numbers(hits[c - 1][1][3] + " " + _ref(hits[c - 1][1][2], hits[c - 1][1][1]))}   # text + its own reference
+        plain = re.sub(r"\[\d+\]", " ", out.get("answer", ""))          # citation marks are not numbers to check
+        bad_num = sorted({n for n in _numbers(plain) if n not in src_nums})
+        ans = E(out.get("answer", ""))
+        ans = re.sub(r"\[(\d+)\]", lambda m: f"<a href='#s{m.group(1)}'>[{m.group(1)}]</a>", ans)
+        model, ti, to = out.get("_usage", ("", 0, 0))
+        warn = ""
+        if bad_cite: warn += f"<p class='err'>Câu trả lời dẫn khoản không có trong kết quả tìm: {E(', '.join(map(str, bad_cite)))}</p>"
+        if bad_num: warn += f"<p class='err'>Con số không có trong các khoản được dẫn: {E(', '.join(bad_num))} — kiểm tra lại với nguyên văn.</p>"
+        body.append(f"""<div class='panel' style='border-color:var(--accent)'><h3 style='margin-top:0'>Trả lời</h3>
+<p class='law' style='font-family:inherit;font-size:1rem'>{ans}</p>{warn}
+{f"<p class='muted'><b>Không tìm thấy căn cứ:</b> {E(out['not_found'])}</p>" if out.get('not_found') else ''}
+<p class='muted' style='font-size:.78rem;margin-bottom:0'>{E(model)} · {ti:,} token vào, {to:,} token ra. Câu trả lời do model viết từ các khoản bên dưới;
+chuyên gia cần đối chiếu nguyên văn. Văn bản sửa đổi chỉ được tính nếu khoản sửa đổi nằm trong kết quả tìm.</p></div>""")
+    rows = []
+    for i, (score, (did, num, loc, text)) in enumerate(hits, 1):
+        rows.append(f"<div class='art' id='s{i}'><b>[{i}] <a href='/doc/{did}#d{loc.get('dieu')}'>{E(_ref(loc, num))}</a></b> "
+                    f"<span class='muted'>{E(loc.get('dieu_title') or '')} · điểm {score:.1f}</span>"
+                    f"<p class='law' style='font-size:.9rem'>{E(text.split(chr(10), 1)[-1][:1800])}</p></div>")
+    body.append(f"<div class='panel'><h3 style='margin-top:0'>Các khoản tìm được ({len(hits)})</h3>{''.join(rows)}</div>")
+    return page("Hỏi thử", "".join(body), "/ask")
