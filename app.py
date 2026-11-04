@@ -317,6 +317,26 @@ def proposal(pid: int, err: str = ""):
     out.append(f"<div class='kpis' style='margin-bottom:12px'><div class='kpi'><b>{c.get('new', 0)}</b>khoản mới</div>"
                f"<div class='kpi'><b>{c.get('changed', 0)}</b>đổi chữ</div><div class='kpi'><b>{c.get('unchanged', 0)}</b>không đổi</div>"
                f"<div class='kpi'><b>{c.get('retired', 0)}</b>ngừng dùng</div></div>")
+    # 0. agent00's notes (if the proposal came from the agent)
+    ag = rep.get("agent")
+    if ag:
+        vlab, vcls = {"ok": ("có thể duyệt", "ok"), "check": ("cần xem kỹ", "no"), "reject": ("không nên nạp", "no")}.get(ag.get("verdict"), ("?", ""))
+        o = ag.get("ocr") or {}
+        nc = "".join(f"<tr><td>trang {x['page']}</td><td><del>{E(', '.join(x['removed']))}</del></td><td><ins>{E(', '.join(x['added']))}</ins></td></tr>"
+                     for x in o.get("number_changes", []))
+        uns = "".join(f"<li>trang {u['page']}: {E(u['note'])}</li>" for u in o.get("unsure", []))
+        low = ", ".join(f"{E(w['word'])} <span class='muted'>(tr.{w['page']})</span>" for w in o.get("low_conf", [])[:60])
+        out.append(f"<div class='panel' style='border-color:var(--accent)'><h3 style='margin-top:0'>Nhận xét của agent00 "
+                   f"<span class='pill {vcls}'>{vlab}</span></h3><p>{E(ag.get('comment', ''))}</p>"
+                   f"<details><summary>Các bước agent đã làm ({len(ag.get('steps', []))})</summary><ol style='font-size:.88rem'>"
+                   + "".join(f"<li>{E(x)}</li>" for x in ag.get("steps", [])) + "</ol></details>"
+                   + (f"<h4>Văn bản OCR — đối chiếu với bản scan</h4><p class='muted' style='font-size:.85rem'>Những con số khác nhau giữa OCR thô và bản đã làm sạch. "
+                      f"Mỗi dòng phải được kiểm tra trên bản scan.</p><div class='scroll'><table><tr><th>Trang</th><th>OCR thô</th><th>Sau khi làm sạch</th></tr>{nc or '<tr><td colspan=3 class=muted>Không có con số nào bị đổi.</td></tr>'}</table></div>"
+                      + (f"<p style='font-size:.88rem'><b>Model không chắc:</b></p><ul style='font-size:.88rem'>{uns}</ul>" if uns else "")
+                      + (f"<details><summary>Từ OCR độ tin cậy thấp ({len(o.get('low_conf', []))})</summary><p style='font-size:.85rem'>{low}</p></details>" if low else "")
+                      if o else "")
+                   + f"<p class='muted' style='font-size:.78rem;margin-bottom:0'>{E(ag.get('agent', ''))} · {E(ag.get('provider', ''))}/{E(ag.get('model', ''))} · "
+                     f"{ag.get('calls', 0)} lần gọi · {ag.get('tokens', 0)} token. Nhận xét chỉ để tham khảo; kiểm tra tự động và người duyệt mới là quyết định.</p></div>")
     # 1. checks
     acc = set(rep.get("accepted") or [])
     rows = "".join(f"<tr><td>{'<span class=\"pill ok\">ĐẠT</span>' if ch['ok'] else ('<span class=\"pill no\">LỖI · chấp nhận</span>' if ch['name'] in acc else '<span class=\"pill no\">LỖI</span>')}</td>"
