@@ -609,6 +609,44 @@ class Index:
 
 
 INDEX = Index()
+
+
+def vector_search(conn, q, k=30):
+    """Semantic search with Voyage AI + pgvector, if the clauses have Voyage vectors and VOYAGE_API_KEY is set.
+    Returns (rows, note). The question is embedded with the SAME model that embedded the clauses."""
+    key = os.environ.get("VOYAGE_API_KEY")
+    models = [r[0] for r in conn.execute("SELECT DISTINCT embedding_model FROM chunks WHERE embedding IS NOT NULL").fetchall()]
+    if not models:
+        return [], "chưa có vector (chạy loader.py embed) — chỉ tìm theo từ khóa"
+    if len(models) > 1 or not models[0].startswith("voyage:"):
+        return [], f"vector trong database là {models}, trang này chỉ dùng vector Voyage — chỉ tìm theo từ khóa"
+    if not key:
+        return [], "chưa đặt VOYAGE_API_KEY trên Render — chỉ tìm theo từ khóa"
+    model = models[0].split(":", 1)[1]
+    body = json.dumps({"input": [q], "model": model, "input_type": "query", "output_dimension": 1024}).encode()
+    req = urllib.request.Request(os.environ.get("VOYAGE_API_BASE", "https://api.voyageai.com") + "/v1/embeddings", body,
+                                 {"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+    try:
+        vec = json.load(urllib.request.urlopen(req, timeout=30))["data"][0]["embedding"]
+    except Exception as e:
+        return [], f"Voyage API lỗi ({str(e)[:120]}) — chỉ tìm theo từ khóa"
+    rows = conn.execute("""SELECT d.id, d.number, c.locator, c.text, 1 - (c.embedding <=> %s::vector) AS sim
+                           FROM chunks c JOIN legal_documents d ON d.id=c.document_id
+                           WHERE c.source_kind='legal_article' AND NOT coalesce(c.retired,false) AND c.embedding IS NOT NULL
+                           ORDER BY c.embedding <=> %s::vector LIMIT %s""",
+                        ("[" + ",".join(f"{x:.6f}" for x in vec) + "]",) * 2 + (k,)).fetchall()
+    return rows, f"từ khóa (BM25) + theo nghĩa ({model})"
+
+
+def fuse(bm25_hits, vec_rows, k=12):
+    """Reciprocal rank fusion: a clause ranked high by either method comes first; found by both counts most."""
+    score, row, how = {}, {}, {}
+    for rank, (_, r) in enumerate(bm25_hits):
+        key = (r[1], json.dumps(r[2], sort_keys=True)); score[key] = score.get(key, 0) + 1 / (60 + rank); row[key] = r; how.setdefault(key, set()).add("từ khóa")
+    for rank, r in enumerate(vec_rows):
+        key = (r[1], json.dumps(r[2], sort_keys=True)); score[key] = score.get(key, 0) + 1 / (60 + rank); row.setdefault(key, r[:4]); how.setdefault(key, set()).add("theo nghĩa")
+    best = sorted(score, key=lambda x: -score[x])[:k]
+    return [(score[x] * 1000, row[x], " + ".join(sorted(how[x]))) for x in best]
 ASK_LOG = deque()   # timestamps of model calls, for the hourly limit
 
 
@@ -662,11 +700,14 @@ def ask(q: str = Query("", max_length=500), doc: str = Query("", max_length=40))
     with db() as conn:
         INDEX.ensure(conn)
         docs = [r[0] for r in conn.execute("SELECT DISTINCT d.number FROM legal_documents d JOIN chunks c ON c.document_id=d.id ORDER BY 1").fetchall()]
-    hits = []
+    hits, mode = [], ""
     if q.strip():
-        hits = INDEX.search(q, k=40)
-        if doc: hits = [h for h in hits if h[1][1] == doc]
-        hits = hits[:12]
+        with db() as conn:
+            bm = INDEX.search(q, k=40)
+            vr, mode = vector_search(conn, q)
+        if doc:
+            bm = [h for h in bm if h[1][1] == doc]; vr = [r for r in vr if r[1] == doc]
+        hits = fuse(bm, vr) if vr else [(sc, r, "từ khóa") for sc, r in bm[:12]]
     opts = "".join(f"<option value='{E(d)}' {'selected' if d == doc else ''}>{E(d)}</option>" for d in docs)
     body = [f"""<h1>Hỏi đáp</h1><p class='muted'>Tìm các khoản liên quan trong toàn bộ văn bản đã nạp (BM25, không phân biệt dấu), rồi Claude trả lời
 <b>chỉ dựa trên các khoản đó</b>, kèm số khoản làm căn cứ. Dành cho chuyên gia kiểm tra chất lượng tra cứu — không phải tư vấn pháp lý.</p>
@@ -700,9 +741,10 @@ def ask(q: str = Query("", max_length=500), doc: str = Query("", max_length=40))
 <p class='muted' style='font-size:.78rem;margin-bottom:0'>{E(model)} · {ti:,} token vào, {to:,} token ra. Câu trả lời do model viết từ các khoản bên dưới;
 chuyên gia cần đối chiếu nguyên văn. Văn bản sửa đổi chỉ được tính nếu khoản sửa đổi nằm trong kết quả tìm.</p></div>""")
     rows = []
-    for i, (score, (did, num, loc, text)) in enumerate(hits, 1):
+    for i, (score, (did, num, loc, text), how) in enumerate(hits, 1):
         rows.append(f"<div class='art' id='s{i}'><b>[{i}] <a href='/doc/{did}#d{loc.get('dieu')}'>{E(_ref(loc, num))}</a></b> "
-                    f"<span class='muted'>{E(loc.get('dieu_title') or '')} · điểm {score:.1f}</span>"
+                    f"<span class='muted'>{E(loc.get('dieu_title') or '')}</span> <span class='pill{' ok' if '+' in how else ''}'>{E(how)}</span>"
                     f"<p class='law' style='font-size:.9rem'>{E(text.split(chr(10), 1)[-1][:1800])}</p></div>")
-    body.append(f"<div class='panel'><h3 style='margin-top:0'>Các khoản tìm được ({len(hits)})</h3>{''.join(rows)}</div>")
+    body.append(f"<div class='panel'><h3 style='margin-top:0'>Các khoản tìm được ({len(hits)})</h3>"
+                f"<p class='muted' style='font-size:.82rem'>Cách tìm: {E(mode)}</p>{''.join(rows)}</div>")
     return page("Hỏi đáp", "".join(body), "/ask")
