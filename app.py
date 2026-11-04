@@ -270,26 +270,41 @@ def word_diff(old, new):
     return "".join(out)
 
 
+VERDICT_VI = {"ok": ("có thể duyệt", "ok"), "check": ("cần xem kỹ", "no"), "reject": ("không nên nạp", "no")}
+
+
+def agent_cell(verdict, comment, route):
+    if not verdict:
+        return "<td class='muted' style='font-size:.82rem'>— (tạo bằng loader.py propose)</td>"
+    lab, cls = VERDICT_VI.get(verdict, (verdict, ""))
+    how = {"ocr": "bản scan · OCR + Claude đọc ảnh", "parse": "file có chữ"}.get(route or "", route or "")
+    text = comment or ""
+    short = E(text[:260]) + ("…" if len(text) > 260 else "")
+    return (f"<td style='font-size:.85rem'><span class='pill {cls}'>{lab}</span> <span class='muted'>{E(how)}</span><br>{short}</td>")
+
+
 @app.get("/proposals", dependencies=[Depends(auth)])
 def proposals():
     with db() as conn:
         if conn.execute("SELECT to_regclass('public.load_proposals')").fetchone()[0] is None:
             return page("Chờ duyệt", "<h1>Chờ duyệt</h1><div class='panel'>Chưa có bảng đề xuất. Chạy <code>python loader.py migrate</code>.</div>", "/proposals")
         rows = conn.execute("""SELECT id, status, doc_code, file_name, created_at::timestamp(0), created_by, reviewed_by,
-                                      report->'chunks', report->'accepted', jsonb_array_length(coalesce(report->'issues','[]'))
+                                      report->'chunks', report->'accepted', jsonb_array_length(coalesce(report->'issues','[]')),
+                                      report->'agent'->>'verdict', report->'agent'->>'comment', report->'agent'->>'route' 
                                FROM load_proposals ORDER BY (status='pending') DESC, id DESC LIMIT 100""").fetchall()
     t = ["<h1>Đề xuất nạp văn bản</h1><p class='muted'>Tạo bằng <code>python loader.py propose …</code> trên máy dev. "
          "Duyệt ở đây, rồi chạy <code>python loader.py apply</code> để nạp.</p><div class='panel scroll'><table>"
-         "<tr><th>#</th><th>Trạng thái</th><th>Văn bản</th><th>Khoản mới / đổi / ngừng</th><th>Ngoại lệ</th><th>Tạo</th><th>Duyệt</th></tr>"]
+         "<tr><th>#</th><th>Trạng thái</th><th>Văn bản</th><th>Khoản mới / đổi / ngừng</th><th style='min-width:280px'>Nhận xét của agent00</th><th>Ngoại lệ</th><th>Tạo</th><th>Duyệt</th></tr>"]
     for r in rows:
         lab, cls = STATUS_VI.get(r[1], (r[1], ""))
         c = r[7] or {}
         t.append(f"<tr><td><a href='/proposals/{r[0]}'>#{r[0]}</a></td><td><span class='pill {cls}'>{lab}</span></td>"
                  f"<td><a href='/proposals/{r[0]}'><b>{E(r[2])}</b></a><br><span class='muted' style='font-size:.8rem'>{E(r[3] or '')}</span></td>"
                  f"<td>{c.get('new', 0)} / {c.get('changed', 0)} / {c.get('retired', 0)}</td>"
-                 f"<td style='font-size:.82rem'>{E(', '.join(r[8] or [])) or '—'}<br><span class='muted'>{r[9]} ghi chú parser</span></td>"
+                 + agent_cell(r[10], r[11], r[12]) +
+                 f"<td style='font-size:.82rem'>{E(', '.join(x.split(':')[0] for x in (r[8] or []))) or '—'}<br><span class='muted'>{r[9]} ghi chú parser</span></td>"
                  f"<td style='font-size:.82rem'>{r[4]}<br>{E(r[5] or '')}</td><td>{E(r[6] or '')}</td></tr>")
-    t.append("</table></div>" if rows else "<tr><td colspan=7 class='muted'>Chưa có đề xuất nào.</td></tr></table></div>")
+    t.append("</table></div>" if rows else "<tr><td colspan=8 class='muted'>Chưa có đề xuất nào.</td></tr></table></div>")
     return page("Chờ duyệt", "".join(t), "/proposals")
 
 
