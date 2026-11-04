@@ -63,7 +63,7 @@ ins{background:var(--oks);color:var(--ok);text-decoration:none;border-radius:3px
 details>summary{cursor:pointer;font-weight:600}textarea{font:inherit;width:100%;min-height:70px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink)}
 button.ghost{background:var(--code);color:var(--ink)}.err{background:var(--warns);color:var(--warn);padding:8px 12px;border-radius:8px}
 """
-NAV = [("/", "Văn bản"), ("/ask", "Hỏi thử"), ("/search", "Tìm kiếm"), ("/obligations", "Nghĩa vụ & rule engine"), ("/proposals", "Chờ duyệt"), ("/runs", "Nhật ký nạp")]
+NAV = [("/", "Văn bản"), ("/ask", "Hỏi đáp"), ("/search", "Tìm kiếm"), ("/obligations", "Nghĩa vụ & rule engine"), ("/proposals", "Chờ duyệt"), ("/runs", "Nhật ký nạp")]
 
 
 def page(title, body, active="/"):
@@ -567,7 +567,7 @@ và được đánh dấu là đã được bạn duyệt — lần chạy agent
     return page(f"Đề xuất #{pid}", "".join(out), "/proposals")
 
 
-# ---------------------------------------------------------------- Hỏi thử (RAG): BM25 over all clauses + Claude answer with citations
+# ---------------------------------------------------------------- Hỏi đáp (RAG): BM25 over all clauses + Claude answer with citations
 # Same retrieval as the tra cứu page: accent-insensitive, syllable unigrams + bigrams, BM25 (19/20 on the NĐ 39 question set).
 STOP = set("cac cua va la co cho duoc trong theo tai voi nhung mot khi thi de ve tu den nay do sau day phai ai gi nao the bao nhieu khong".split())
 
@@ -668,15 +668,15 @@ def ask(q: str = Query("", max_length=500), doc: str = Query("", max_length=40))
         if doc: hits = [h for h in hits if h[1][1] == doc]
         hits = hits[:12]
     opts = "".join(f"<option value='{E(d)}' {'selected' if d == doc else ''}>{E(d)}</option>" for d in docs)
-    body = [f"""<h1>Hỏi thử</h1><p class='muted'>Tìm các khoản liên quan trong toàn bộ văn bản đã nạp (BM25, không phân biệt dấu), rồi Claude trả lời
+    body = [f"""<h1>Hỏi đáp</h1><p class='muted'>Tìm các khoản liên quan trong toàn bộ văn bản đã nạp (BM25, không phân biệt dấu), rồi Claude trả lời
 <b>chỉ dựa trên các khoản đó</b>, kèm số khoản làm căn cứ. Dành cho chuyên gia kiểm tra chất lượng tra cứu — không phải tư vấn pháp lý.</p>
 <form class='row panel' method='get'><input name='q' value='{E(q)}' style='flex:1;min-width:260px' placeholder='ví dụ: công ty xây dựng 120 người có phải thành lập hội đồng ATVSLĐ không?'>
 <select name='doc'><option value=''>Mọi văn bản</option>{opts}</select><button>Hỏi</button></form>"""]
     if not q.strip():
-        return page("Hỏi thử", "".join(body), "/ask")
+        return page("Hỏi đáp", "".join(body), "/ask")
     if not hits:
         body.append("<div class='panel'>Không tìm thấy khoản nào chứa các từ trong câu hỏi.</div>")
-        return page("Hỏi thử", "".join(body), "/ask")
+        return page("Hỏi đáp", "".join(body), "/ask")
     out, err = ask_claude(q, hits)
     if err:
         body.append(f"<p class='err'>{E(err)}</p>")
@@ -705,4 +705,4 @@ chuyên gia cần đối chiếu nguyên văn. Văn bản sửa đổi chỉ đ�
                     f"<span class='muted'>{E(loc.get('dieu_title') or '')} · điểm {score:.1f}</span>"
                     f"<p class='law' style='font-size:.9rem'>{E(text.split(chr(10), 1)[-1][:1800])}</p></div>")
     body.append(f"<div class='panel'><h3 style='margin-top:0'>Các khoản tìm được ({len(hits)})</h3>{''.join(rows)}</div>")
-    return page("Hỏi thử", "".join(body), "/ask")
+    return page("Hỏi đáp", "".join(body), "/ask")
