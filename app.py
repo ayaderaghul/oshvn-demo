@@ -1,14 +1,16 @@
-"""OSHVN demo web — read-only view of what is in the Neon database.
+"""OSHVN demo web — view of what is in the Neon database, plus review of load proposals.
 
-Pages: documents · one document (Điều › Khoản) · keyword search · obligations + rule engine · load log.
-Environment: DATABASE_URL (read-only role), APP_PASSWORD (HTTP Basic, any user name).
+Pages: documents · one document (Điều › Khoản) · keyword search · obligations + rule engine · load log · proposals.
+Environment: DATABASE_URL (role oshvn_web: reads tables; its only write is the review_proposal() function),
+APP_PASSWORD (HTTP Basic; the user name is recorded as the reviewer).
 """
-import html, json, os, re, secrets
+import difflib, hashlib, hmac, html, json, os, re, secrets
+from urllib.parse import quote
 from contextlib import contextmanager
 
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -20,6 +22,7 @@ def auth(c: HTTPBasicCredentials = Depends(security)):
     pw = os.environ.get("APP_PASSWORD")
     if not pw or not secrets.compare_digest(c.password.encode(), pw.encode()):
         raise HTTPException(401, "Sai mật khẩu", headers={"WWW-Authenticate": "Basic"})
+    return c.username.strip()
 
 
 @contextmanager
@@ -55,15 +58,18 @@ button{font:inherit;font-weight:600;padding:8px 14px;border:0;border-radius:8px;
 .k{display:grid;grid-template-columns:70px minmax(0,1fr);gap:10px;padding:6px 0}.k b{color:var(--accent);font-size:.8rem}
 mark{background:#fde68a;color:inherit}.kpis{display:flex;gap:10px;flex-wrap:wrap}.kpi{background:var(--code);border-radius:8px;padding:8px 12px}.kpi b{display:block;font-size:1.3rem}
 label.c{display:flex;gap:6px;align-items:center;font-size:.9rem}
+ins{background:var(--oks);color:var(--ok);text-decoration:none;border-radius:3px}del{background:var(--warns);color:var(--warn);border-radius:3px}
+details>summary{cursor:pointer;font-weight:600}textarea{font:inherit;width:100%;min-height:70px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink)}
+button.ghost{background:var(--code);color:var(--ink)}.err{background:var(--warns);color:var(--warn);padding:8px 12px;border-radius:8px}
 """
-NAV = [("/", "Văn bản"), ("/search", "Tìm kiếm"), ("/obligations", "Nghĩa vụ & rule engine"), ("/runs", "Nhật ký nạp")]
+NAV = [("/", "Văn bản"), ("/search", "Tìm kiếm"), ("/obligations", "Nghĩa vụ & rule engine"), ("/proposals", "Chờ duyệt"), ("/runs", "Nhật ký nạp")]
 
 
 def page(title, body, active="/"):
     nav = "".join(f'<a href="{h}" class="{"on" if h == active else ""}">{t}</a>' for h, t in NAV)
     return HTMLResponse(f"""<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{E(title)} · OSHVN demo</title><style>{CSS}</style></head><body><div class="wrap">
-<div class="eyebrow">OSHVN · bản demo đọc dữ liệu từ Neon · chỉ đọc</div><nav>{nav}</nav>{body}
+<div class="eyebrow">OSHVN · bản demo dữ liệu từ Neon</div><nav>{nav}</nav>{body}
 <p class="muted" style="font-size:.8rem;margin-top:24px">Dữ liệu luật do bộ tách tự động; nghĩa vụ là bản nháp chưa được chuyên gia OSHVN duyệt.</p>
 </div></body></html>""")
 
@@ -242,3 +248,149 @@ def runs():
         t.append(f"<tr><td>{r[0]}</td><td>{E(r[1])}</td><td><span class='pill {cls}'>{E(r[2])}</span></td><td>{r[3]}</td><td>{E(r[4] or '')}</td><td style='font-size:.85rem'>{E(det)}</td></tr>")
     t.append("</table></div>")
     return page("Nhật ký nạp", "".join(t), "/runs")
+
+
+# ---------------------------------------------------------------- review of load proposals
+STATUS_VI = {"pending": ("Chờ duyệt", "no"), "approved": ("Đã duyệt — chờ nạp", "ok"), "rejected": ("Từ chối", ""),
+             "applied": ("Đã nạp", "ok"), "superseded": ("Bị thay thế", ""), "failed": ("Lỗi khi nạp", "no")}
+
+
+def csrf_token(pid):
+    key = (os.environ.get("APP_PASSWORD") or "").encode()
+    return hmac.new(key, f"proposal:{pid}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def word_diff(old, new):
+    a, b = re.findall(r"\S+|\s+", old or ""), re.findall(r"\S+|\s+", new or "")
+    out = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if tag == "equal": out.append(E("".join(a[i1:i2])))
+        if tag in ("delete", "replace"): out.append(f"<del>{E(''.join(a[i1:i2]))}</del>")
+        if tag in ("insert", "replace"): out.append(f"<ins>{E(''.join(b[j1:j2]))}</ins>")
+    return "".join(out)
+
+
+@app.get("/proposals", dependencies=[Depends(auth)])
+def proposals():
+    with db() as conn:
+        if conn.execute("SELECT to_regclass('public.load_proposals')").fetchone()[0] is None:
+            return page("Chờ duyệt", "<h1>Chờ duyệt</h1><div class='panel'>Chưa có bảng đề xuất. Chạy <code>python loader.py migrate</code>.</div>", "/proposals")
+        rows = conn.execute("""SELECT id, status, doc_code, file_name, created_at::timestamp(0), created_by, reviewed_by,
+                                      report->'chunks', report->'accepted', jsonb_array_length(coalesce(report->'issues','[]'))
+                               FROM load_proposals ORDER BY (status='pending') DESC, id DESC LIMIT 100""").fetchall()
+    t = ["<h1>Đề xuất nạp văn bản</h1><p class='muted'>Tạo bằng <code>python loader.py propose …</code> trên máy dev. "
+         "Duyệt ở đây, rồi chạy <code>python loader.py apply</code> để nạp.</p><div class='panel scroll'><table>"
+         "<tr><th>#</th><th>Trạng thái</th><th>Văn bản</th><th>Khoản mới / đổi / ngừng</th><th>Ngoại lệ</th><th>Tạo</th><th>Duyệt</th></tr>"]
+    for r in rows:
+        lab, cls = STATUS_VI.get(r[1], (r[1], ""))
+        c = r[7] or {}
+        t.append(f"<tr><td><a href='/proposals/{r[0]}'>#{r[0]}</a></td><td><span class='pill {cls}'>{lab}</span></td>"
+                 f"<td><a href='/proposals/{r[0]}'><b>{E(r[2])}</b></a><br><span class='muted' style='font-size:.8rem'>{E(r[3] or '')}</span></td>"
+                 f"<td>{c.get('new', 0)} / {c.get('changed', 0)} / {c.get('retired', 0)}</td>"
+                 f"<td style='font-size:.82rem'>{E(', '.join(r[8] or [])) or '—'}<br><span class='muted'>{r[9]} ghi chú parser</span></td>"
+                 f"<td style='font-size:.82rem'>{r[4]}<br>{E(r[5] or '')}</td><td>{E(r[6] or '')}</td></tr>")
+    t.append("</table></div>" if rows else "<tr><td colspan=7 class='muted'>Chưa có đề xuất nào.</td></tr></table></div>")
+    return page("Chờ duyệt", "".join(t), "/proposals")
+
+
+@app.get("/proposals/{pid}", dependencies=[Depends(auth)])
+def proposal(pid: int, err: str = ""):
+    with db() as conn:
+        r = conn.execute("""SELECT id, status, doc_code, file_name, options, report, payload->'result'->'chunks',
+                                   payload->>'title', created_at::timestamp(0), created_by, reviewed_by, reviewed_at::timestamp(0),
+                                   review_note, apply_report, payload->>'dtype'
+                            FROM load_proposals WHERE id=%s""", (pid,)).fetchone()
+        if not r:
+            raise HTTPException(404)
+        exists = conn.execute("SELECT id FROM legal_documents WHERE number=%s", (r[2],)).fetchone()
+    rep, chunks = r[5] or {}, r[6] or []
+    lab, cls = STATUS_VI.get(r[1], (r[1], ""))
+    c = rep.get("chunks", {})
+    out = [f"<p><a href='/proposals'>← Danh sách đề xuất</a></p><div class='eyebrow'>Đề xuất #{r[0]}</div>",
+           f"<h1>{E(r[2])} <span class='pill {cls}' style='font-size:.8rem;vertical-align:middle'>{lab}</span></h1>",
+           f"<p class='muted' style='margin:0 0 10px'>{E(r[7] or '')}</p>",
+           f"<p class='muted' style='font-size:.85rem'>File {E(r[3] or '')} · tạo {r[8]} bởi {E(r[9] or '?')} · "
+           f"tùy chọn: {E(json.dumps({k: v for k, v in (r[4] or {}).items() if v}, ensure_ascii=False))} · "
+           + (f"<a href='/doc/{exists[0]}'>bản đang có trong database</a>" if exists else "văn bản mới, chưa có trong database") + "</p>"]
+    if err:
+        out.append(f"<p class='err'>{E(err)}</p>")
+    out.append(f"<div class='kpis' style='margin-bottom:12px'><div class='kpi'><b>{c.get('new', 0)}</b>khoản mới</div>"
+               f"<div class='kpi'><b>{c.get('changed', 0)}</b>đổi chữ</div><div class='kpi'><b>{c.get('unchanged', 0)}</b>không đổi</div>"
+               f"<div class='kpi'><b>{c.get('retired', 0)}</b>ngừng dùng</div></div>")
+    # 1. checks
+    acc = set(rep.get("accepted") or [])
+    rows = "".join(f"<tr><td>{'<span class=\"pill ok\">ĐẠT</span>' if ch['ok'] else ('<span class=\"pill no\">LỖI · chấp nhận</span>' if ch['name'] in acc else '<span class=\"pill no\">LỖI</span>')}</td>"
+                   f"<td>{E(ch['name'])}</td><td style='font-size:.85rem'>{E(ch['detail'])}</td></tr>" for ch in rep.get("checks", []))
+    out.append(f"<div class='panel'><h3 style='margin-top:0'>1. Kiểm tra tự động</h3><div class='scroll'><table>{rows}</table></div>"
+               + ("<p class='muted' style='font-size:.85rem;margin-bottom:0'>Kiểm tra được chấp nhận là ngoại lệ đã biết. Hãy chắc rằng phần chưa gán chỉ là tiêu đề, căn cứ, nơi nhận.</p>" if acc else "") + "</div>")
+    # 2. what changes in the database
+    ch = rep.get("changes") or []
+    if ch:
+        items = []
+        for x in ch:
+            key = f"Điều {x['key'][0]}" + (f", khoản {x['key'][1]}" if x['key'][1] else "")
+            if x["change"] == "changed": body = word_diff(x.get("old"), x.get("new"))
+            elif x["change"] == "new": body = f"<ins>{E(x.get('new', ''))}</ins>"
+            else: body = f"<del>{E(x.get('old', ''))}</del>"
+            tag = {"changed": "đổi chữ", "new": "mới", "retired": "ngừng dùng"}[x["change"]]
+            items.append(f"<div class='art'><b>{E(key)}</b> <span class='pill'>{tag}</span><p class='law' style='font-size:.92rem'>{body}</p></div>")
+        out.append(f"<div class='panel'><h3 style='margin-top:0'>2. Thay đổi so với database ({len(ch)})</h3>{''.join(items)}</div>")
+    elif exists:
+        out.append("<div class='panel'><h3 style='margin-top:0'>2. Thay đổi so với database</h3><p class='muted'>Không có khoản nào đổi chữ.</p></div>")
+    # 3. parser notes
+    iss = rep.get("issues") or []
+    if iss:
+        out.append(f"<div class='panel'><details><summary>3. Ghi chú của parser ({len(iss)}) — chỗ nên liếc qua</summary><ul style='font-size:.88rem'>"
+                   + "".join(f"<li>{E(i)}</li>" for i in iss) + "</ul></details></div>")
+    # 4. full parsed text
+    byd, order = {}, []
+    for x in chunks:
+        k = str(x.get("dieu"))
+        if k not in byd: byd[k] = []; order.append(k)
+        byd[k].append(x)
+    arts = []
+    for k in order:
+        x0 = byd[k][0]
+        head = (x0.get("label") or f"Điều {k}") + ". " + (x0.get("dieu_title") or "")
+        parts = "".join(f"<div class='k'><b>{E(x.get('item_label') or (('Khoản ' + str(x['khoan'])) if x.get('khoan') else 'Đoạn'))}</b>"
+                        f"<p class='law'>{E(x.get('text', ''))}</p></div>" for x in byd[k])
+        arts.append(f"<div class='art'><h3>{E(head)}</h3>{parts}</div>")
+    out.append(f"<div class='panel'><details{' open' if not exists else ''}><summary>4. Toàn văn đã tách ({len(order)} điều/phụ lục, {len(chunks)} khoản)</summary>{''.join(arts)}</details></div>")
+    # 5. decision
+    if r[1] == "pending":
+        tok = csrf_token(pid)
+        out.append(f"""<div class='panel'><h3 style='margin-top:0'>5. Quyết định</h3>
+<form method='post' action='/proposals/{pid}/review'><input type='hidden' name='token' value='{tok}'>
+<label>Ghi chú (tùy chọn)<br><textarea name='note' placeholder='ví dụ: đã đối chiếu số hiệu viện dẫn với bản scan'></textarea></label>
+<div class='row' style='margin-top:8px'><button name='decision' value='approved'>Duyệt — cho phép nạp</button>
+<button class='ghost' name='decision' value='rejected'>Từ chối</button></div>
+<p class='muted' style='font-size:.82rem'>Duyệt chưa ghi gì vào database. Văn bản chỉ được nạp khi chạy <code>python loader.py apply</code>.</p></form></div>""")
+    else:
+        out.append(f"<div class='panel'><h3 style='margin-top:0'>5. Quyết định</h3><p>{lab}"
+                   + (f" bởi <b>{E(r[10])}</b> lúc {r[11]}" if r[10] else "") + "</p>"
+                   + (f"<p class='law'>{E(r[12])}</p>" if r[12] else "")
+                   + (f"<p class='muted' style='font-size:.85rem'>Kết quả nạp: {E(json.dumps(r[13], ensure_ascii=False))}</p>" if r[13] else "") + "</div>")
+    return page(f"Đề xuất #{pid}", "".join(out), "/proposals")
+
+
+@app.post("/proposals/{pid}/review")
+async def review(pid: int, request: Request, user: str = Depends(auth)):
+    form = await request.form()
+    origin = request.headers.get("origin")
+    if origin and origin.split("://", 1)[-1] != request.headers.get("host"):
+        raise HTTPException(403, "Sai nguồn gửi")
+    if not hmac.compare_digest(str(form.get("token", "")), csrf_token(pid)):
+        raise HTTPException(403, "Mã xác nhận không đúng — tải lại trang rồi thử lại")
+    decision = form.get("decision")
+    if decision not in ("approved", "rejected"):
+        raise HTTPException(400)
+    if not user:
+        return RedirectResponse(f"/proposals/{pid}?err=" + quote("Đăng nhập với tên của bạn (ô tên đăng nhập) để ghi người duyệt."), 303)
+    url = os.environ.get("DATABASE_URL")
+    try:
+        with psycopg.connect(url, autocommit=True, connect_timeout=15) as conn:   # the only write this app makes
+            conn.execute("SELECT review_proposal(%s, %s, %s, %s)", (pid, decision, user, str(form.get("note", ""))[:2000]))
+    except psycopg.Error as e:
+        msg = (e.diag.message_primary if getattr(e, "diag", None) else None) or "không ghi được quyết định"
+        return RedirectResponse(f"/proposals/{pid}?err=" + quote(msg), 303)
+    return RedirectResponse(f"/proposals/{pid}", 303)
