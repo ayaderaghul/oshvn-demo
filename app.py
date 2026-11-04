@@ -86,16 +86,25 @@ def documents():
           SELECT d.id, d.number, d.type, d.title_vi, d.status, d.parser_version, d.source_file,
                  count(c.*) FILTER (WHERE c.source_kind='legal_article' AND NOT coalesce(c.retired,false)) AS n,
                  count(c.embedding) FILTER (WHERE NOT coalesce(c.retired,false)) AS emb,
-                 count(DISTINCT c.locator->>'dieu') FILTER (WHERE c.source_kind='legal_article' AND NOT coalesce(c.retired,false)) AS dieu
+                 count(DISTINCT c.locator->>'dieu') FILTER (WHERE c.source_kind='legal_article' AND NOT coalesce(c.retired,false)
+                                                           AND c.locator->>'dieu' ~ '^[0-9]+$') AS dieu,
+                 count(*) FILTER (WHERE c.source_kind='legal_article' AND NOT coalesce(c.retired,false)
+                                  AND c.locator->>'kind' LIKE 'appendix%%') AS pl
           FROM legal_documents d LEFT JOIN chunks c ON c.document_id=d.id
           GROUP BY d.id ORDER BY (count(c.*)=0), d.number""").fetchall()
-        tot = conn.execute("SELECT count(*) FROM chunks WHERE source_kind='legal_article' AND NOT coalesce(retired,false)").fetchone()[0]
-    body = [f"<h1>Văn bản trong database</h1><div class='kpis' style='margin:10px 0 14px'><div class='kpi'><b>{len(rows)}</b>văn bản</div><div class='kpi'><b>{tot:,}</b>khoản</div></div>"]
-    body.append("<div class='panel scroll'><table><tr><th>Số hiệu</th><th>Loại</th><th>Tên</th><th>Điều</th><th>Khoản</th><th>Vector</th><th>Nguồn</th></tr>")
+        tot, tot_dieu, tot_pl = conn.execute("""
+          SELECT count(*),
+                 count(DISTINCT (document_id, locator->>'dieu')) FILTER (WHERE locator->>'dieu' ~ '^[0-9]+$'),
+                 count(*) FILTER (WHERE locator->>'kind' LIKE 'appendix%%')
+          FROM chunks WHERE source_kind='legal_article' AND NOT coalesce(retired,false)""").fetchone()
+    body = [f"<h1>Văn bản trong database</h1><div class='kpis' style='margin:10px 0 14px'><div class='kpi'><b>{len(rows)}</b>văn bản</div><div class='kpi'><b>{tot_dieu:,}</b>điều</div>"
+            f"<div class='kpi'><b>{tot - tot_pl:,}</b>khoản và đoạn</div><div class='kpi'><b>{tot_pl:,}</b>mục phụ lục</div></div>"
+            "<p class='muted' style='font-size:.82rem;margin-top:-6px'>Khoản và đoạn: mỗi khoản, cộng đoạn mở đầu của Điều; Điều không chia khoản tính là một đoạn.</p>"]
+    body.append("<div class='panel scroll'><table><tr><th>Số hiệu</th><th>Loại</th><th>Tên</th><th>Điều</th><th>Khoản và đoạn</th><th>Mục phụ lục</th><th>Vector</th><th>Nguồn</th></tr>")
     for r in rows:
         link = f"<a href='/doc/{r[0]}'>{E(r[1])}</a>" if r[7] else E(r[1])
         src = f"{E(r[6] or '')}<br><span class='muted'>{E(r[5] or 'dữ liệu mẫu')}</span>" if r[6] else "<span class='muted'>dữ liệu mẫu ban đầu</span>"
-        body.append(f"<tr><td>{link}</td><td>{E(r[2] or '')}</td><td>{E((r[3] or '')[:140])}</td><td>{r[9]}</td><td>{r[7]}</td>"
+        body.append(f"<tr><td>{link}</td><td>{E(r[2] or '')}</td><td>{E((r[3] or '')[:140])}</td><td>{r[9]}</td><td>{r[7] - r[10]}</td><td>{r[10] or '—'}</td>"
                     f"<td>{r[8]}</td><td style='font-size:.8rem'>{src}</td></tr>")
     body.append("</table></div>")
     return page("Văn bản", "".join(body), "/")
