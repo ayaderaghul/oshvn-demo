@@ -102,7 +102,7 @@ def document(doc_id: int):
         if not d:
             raise HTTPException(404)
         rows = conn.execute("""SELECT locator, text FROM chunks WHERE document_id=%s AND source_kind='legal_article' AND NOT coalesce(retired,false)
-                               ORDER BY (locator->>'dieu')::int, coalesce((locator->>'khoan')::int, 0), coalesce((locator->>'seq')::int,0)""", (doc_id,)).fetchall()
+                               ORDER BY (locator->>'dieu' LIKE 'PL%%'), nullif(regexp_replace(locator->>'dieu','[^0-9]','','g'),'')::int, coalesce((locator->>'khoan')::int, 0), coalesce((locator->>'seq')::int,0)""", (doc_id,)).fetchall()
     arts, order = {}, []
     for loc, text in rows:
         key = loc.get("dieu")
@@ -112,15 +112,18 @@ def document(doc_id: int):
     toc, lastch = [], None
     for k in order:
         loc = arts[k]["loc"]
-        if loc.get("chuong") != lastch:
-            lastch = loc.get("chuong"); toc.append(f"<h4>{E(str(loc.get('label') and loc.get('chuong_title') or ('Chương ' + str(lastch or '') + ' · ' + str(loc.get('chuong_title') or ''))))}</h4>")
+        group = "Phụ lục" if loc.get("kind") == "appendix_item" else loc.get("chuong")
+        if group != lastch:
+            lastch = group
+            head = "Phụ lục" if group == "Phụ lục" else (f"Chương {group} · {loc.get('chuong_title') or ''}" if group else "")
+            if head: toc.append(f"<h4>{E(head)}</h4>")
         toc.append(f"<a href='#d{k}'>{E(loc.get('label') or 'Đ.' + str(k))} {E(loc.get('dieu_title') or '')}</a>")
     main = []
     for k in order:
         loc = arts[k]["loc"]
         main.append(f"<div class='art' id='d{k}'><h3>{E(loc.get('label') or 'Điều ' + str(k))}. {E(loc.get('dieu_title') or '')}</h3>")
         for pl, t in arts[k]["parts"]:
-            tag = f"Khoản {pl['khoan']}" if pl.get("khoan") else ("Mở đầu" if pl.get("kind") == "lead" else "Đoạn")
+            tag = f"{'Mục' if pl.get('kind') == 'appendix_item' else 'Khoản'} {pl['khoan']}" if pl.get("khoan") else ("Mở đầu" if pl.get("kind") == "lead" else "Đoạn")
             main.append(f"<div class='k'><b>{tag}</b><p class='law'>{E(t)}</p></div>")
         main.append("</div>")
     checks = "".join(f"<span class='pill {'ok' if c['ok'] else 'no'}' title='{E(c['detail'])}'>{'ĐẠT' if c['ok'] else 'LỖI'} · {E(c['name'])}</span> "
@@ -153,7 +156,7 @@ def search(q: str = Query("", max_length=300)):
     res = []
     for did, num, loc, rank, snip in hits:
         snip = E(snip).replace("&lt;mark&gt;", "<mark>").replace("&lt;/mark&gt;", "</mark>")
-        ref = (loc.get("label") or f"Điều {loc.get('dieu')}") + (f", khoản {loc['khoan']}" if loc.get("khoan") else "")
+        ref = loc.get("ref") or ((loc.get("label") or f"Điều {loc.get('dieu')}") + (f", khoản {loc['khoan']}" if loc.get("khoan") else ""))
         res.append(f"<div class='art'><a href='/doc/{did}#d{loc.get('dieu')}'><b>{E(num)} · {E(ref)}</b></a> <span class='muted'>{E(loc.get('dieu_title') or '')}</span>"
                    f"<p class='law' style='font-size:.92rem'>{snip}</p></div>")
     body = (f"<h1>Tìm kiếm từ khóa</h1><p class='muted'>Tìm trên toàn bộ khoản luật, không phân biệt dấu. Tìm theo nghĩa (vector) sẽ có khi tạo embedding.</p>"
