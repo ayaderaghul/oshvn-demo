@@ -299,18 +299,22 @@ def proposals():
             return page("Chờ duyệt", "<h1>Chờ duyệt</h1><div class='panel'>Chưa có bảng đề xuất. Chạy <code>python loader.py migrate</code>.</div>", "/proposals")
         rows = conn.execute("""SELECT id, status, doc_code, file_name, created_at::timestamp(0), created_by, reviewed_by,
                                       report->'chunks', report->'accepted', jsonb_array_length(coalesce(report->'issues','[]')),
-                                      report->'agent'->>'verdict', report->'agent'->>'comment', report->'agent'->>'route' 
-                               FROM load_proposals ORDER BY (status='pending') DESC, id DESC LIMIT 100""").fetchall()
-    t = ["<h1>Đề xuất nạp văn bản</h1><p class='muted'>Tạo bằng <code>python loader.py propose …</code> trên máy dev. "
+                                      report->'agent'->>'verdict', report->'agent'->>'comment', report->'agent'->>'route',
+                                      coalesce(to_jsonb(lp)->>'kind', 'documents'),
+                                      jsonb_array_length(coalesce(payload->'obligations','[]')),
+                                      jsonb_array_length(coalesce(report->'rejected','[]')), report->>'flagged'
+                               FROM load_proposals lp ORDER BY (status='pending') DESC, id DESC LIMIT 100""").fetchall()
+    t = ["<h1>Đề xuất chờ duyệt</h1><p class='muted'>Văn bản luật (agent00, <code>loader.py propose</code>) và nghĩa vụ (agent01). "
          "Duyệt ở đây, rồi chạy <code>python loader.py apply</code> để nạp.</p><div class='panel scroll'><table>"
-         "<tr><th>#</th><th>Trạng thái</th><th>Văn bản</th><th>Khoản mới / đổi / ngừng</th><th style='min-width:280px'>Nhận xét của agent00</th><th>Ngoại lệ</th><th>Tạo</th><th>Duyệt</th></tr>"]
+         "<tr><th>#</th><th>Trạng thái</th><th>Văn bản</th><th>Thay đổi</th><th style='min-width:280px'>Nhận xét của agent</th><th>Ngoại lệ</th><th>Tạo</th><th>Duyệt</th></tr>"]
     for r in rows:
         lab, cls = STATUS_VI.get(r[1], (r[1], ""))
         c = r[7] or {}
         t.append(f"<tr><td><a href='/proposals/{r[0]}'>#{r[0]}</a></td><td><span class='pill {cls}'>{lab}</span></td>"
                  f"<td><a href='/proposals/{r[0]}'><b>{E(r[2])}</b></a><br><span class='muted' style='font-size:.8rem'>{E(r[3] or '')}</span></td>"
-                 f"<td>{c.get('new', 0)} / {c.get('changed', 0)} / {c.get('retired', 0)}</td>"
-                 + agent_cell(r[10], r[11], r[12]) +
+                 + (f"<td><b>{r[14]}</b> nghĩa vụ</td><td style='font-size:.85rem'><span class='pill'>agent01</span> "
+                    f"{r[14]} đạt kiểm tra · {r[15]} bị loại · <b>{r[16] or 0}</b> có ý không có căn cứ</td>" if r[13] == "obligations" else
+                    f"<td>{c.get('new', 0)} mới / {c.get('changed', 0)} đổi / {c.get('retired', 0)} ngừng</td>" + agent_cell(r[10], r[11], r[12])) +
                  f"<td style='font-size:.82rem'>{E(', '.join(x.split(':')[0] for x in (r[8] or []))) or '—'}<br><span class='muted'>{r[9]} ghi chú parser</span></td>"
                  f"<td style='font-size:.82rem'>{r[4]}<br>{E(r[5] or '')}</td><td>{E(r[6] or '')}</td></tr>")
     t.append("</table></div>" if rows else "<tr><td colspan=8 class='muted'>Chưa có đề xuất nào.</td></tr></table></div>")
@@ -319,6 +323,10 @@ def proposals():
 
 @app.get("/proposals/{pid}", dependencies=[Depends(auth)])
 def proposal(pid: int, err: str = ""):
+    with db() as conn:
+        k = conn.execute("SELECT coalesce(to_jsonb(lp)->>'kind','documents') FROM load_proposals lp WHERE id=%s", (pid,)).fetchone()
+    if k and k[0] == "obligations":
+        return obligation_proposal(pid, err)
     with db() as conn:
         r = conn.execute("""SELECT id, status, doc_code, file_name, options, report, payload->'result'->'chunks',
                                    payload->>'title', created_at::timestamp(0), created_by, reviewed_by, reviewed_at::timestamp(0),
@@ -438,8 +446,121 @@ async def review(pid: int, request: Request, user: str = Depends(auth)):
     url = os.environ.get("DATABASE_URL")
     try:
         with psycopg.connect(url, autocommit=True, connect_timeout=15) as conn:   # the only write this app makes
-            conn.execute("SELECT review_proposal(%s, %s, %s, %s)", (pid, decision, user, str(form.get("note", ""))[:2000]))
+            if form.get("items") == "1":   # obligations proposal: reviewer may drop single obligations
+                excl = [x for x in form.getlist("exclude") if re.fullmatch(r"[A-Za-z0-9.\-]{1,40}", str(x))]
+                conn.execute("SELECT review_proposal_items(%s, %s, %s, %s, %s::jsonb)",
+                             (pid, decision, user, str(form.get("note", ""))[:2000], json.dumps(excl)))
+            else:
+                conn.execute("SELECT review_proposal(%s, %s, %s, %s)", (pid, decision, user, str(form.get("note", ""))[:2000]))
     except psycopg.Error as e:
         msg = (e.diag.message_primary if getattr(e, "diag", None) else None) or "không ghi được quyết định"
         return RedirectResponse(f"/proposals/{pid}?err=" + quote(msg), 303)
     return RedirectResponse(f"/proposals/{pid}", 303)
+
+
+# ---------------------------------------------------------------- obligations proposals (agent01)
+OPS_VI = {"=": "=", "!=": "≠", ">=": "≥", "<": "<", "<=": "≤", "in": "thuộc"}
+
+
+def rule_text(r):
+    """applies_when → plain Vietnamese, e.g. 'n ≥ 50 VÀ (Ngành thi công xây dựng HOẶC …)'."""
+    if not isinstance(r, dict): return "?"
+    if r.get("always"): return "mọi doanh nghiệp"
+    if "all" in r: return " VÀ ".join(f"({rule_text(x)})" if ("any" in x) else rule_text(x) for x in r["all"])
+    if "any" in r: return " HOẶC ".join(rule_text(x) for x in r["any"])
+    if "not" in r: return f"KHÔNG ({rule_text(r['not'])})"
+    f, op, v = r.get("field"), r.get("op"), r.get("value")
+    name = LABEL.get(f, f)
+    if v is True and op == "=": return name
+    if v is False and op == "=": return f"không: {name}"
+    return f"{name} {OPS_VI.get(op, op)} {json.dumps(v, ensure_ascii=False)}"
+
+
+def src_label(s):
+    return f"{s[0]} Điều {s[1]}" + (f" khoản {s[2]}" if s[2] is not None else "")
+
+
+def obligation_proposal(pid, err):
+    with db() as conn:
+        r = conn.execute("""SELECT id, status, doc_code, payload, report, created_at::timestamp(0), created_by, reviewed_by,
+                                   reviewed_at::timestamp(0), review_note, apply_report, to_jsonb(lp)->'excluded'
+                            FROM load_proposals lp WHERE id=%s""", (pid,)).fetchone()
+    if not r: raise HTTPException(404)
+    payload, rep = r[3] or {}, r[4] or {}
+    obls, texts, excluded = payload.get("obligations", []), payload.get("texts", {}), set(r[11] or [])
+    lab, cls = STATUS_VI.get(r[1], (r[1], ""))
+    ag = rep.get("agent", {})
+    pending = r[1] == "pending"
+    out = [f"<p><a href='/proposals'>← Danh sách đề xuất</a></p><div class='eyebrow'>Đề xuất #{r[0]} · nghĩa vụ</div>",
+           f"<h1>{E(r[2])} <span class='pill {cls}' style='font-size:.8rem;vertical-align:middle'>{lab}</span></h1>",
+           f"<p class='muted' style='font-size:.85rem'>Tạo {r[5]} bởi {E(r[6] or '?')} · {E(ag.get('agent', ''))} · soạn bằng {E(ag.get('draft_model', ''))}, "
+           f"lọc và kiểm chứng bằng {E(ag.get('filter_model', ''))} · {ag.get('calls', 0)} lần gọi · {ag.get('tokens', 0):,} token</p>"]
+    if err: out.append(f"<p class='err'>{E(err)}</p>")
+    out.append(f"<div class='kpis' style='margin-bottom:12px'><div class='kpi'><b>{len(obls)}</b>nghĩa vụ đạt kiểm tra</div>"
+               f"<div class='kpi'><b>{rep.get('flagged', 0)}</b>có ý không có căn cứ</div><div class='kpi'><b>{len(rep.get('rejected', []))}</b>bị loại tự động</div>"
+               f"<div class='kpi'><b>{len(rep.get('new_fields', []))}</b>đề nghị trường hồ sơ mới</div></div>")
+    out.append("<div class='panel' style='font-size:.9rem'><b>Cách duyệt.</b> Mỗi nghĩa vụ đặt cạnh nguyên văn căn cứ. Đọc nội dung, điều kiện áp dụng và mức phạt; "
+               "ý có viền vàng là ý model kiểm chứng cho là <b>không có trong căn cứ</b>. Nghĩa vụ chưa ổn thì tick <b>Loại</b>; phần còn lại được nạp khi duyệt.</div>")
+    if pending:
+        out.append(f"<form method='post' action='/proposals/{pid}/review'><input type='hidden' name='token' value='{csrf_token(pid)}'><input type='hidden' name='items' value='1'>")
+    for o in obls:
+        v = o.get("_verify") or {}
+        uns, inf = v.get("unsupported") or [], v.get("inferred") or []
+        am = o.get("_amended_by") or []
+        def src_block(s):
+            notes = [m for m in am if m["source"] == s]
+            badge = "".join(f"<br><span class='pill no' style='white-space:normal'>{E(m['action'])}{(' điểm ' + E(m['diem'])) if m.get('diem') else ''} bởi {E(src_label(m['by']))}</span>" for m in notes)
+            old = "opacity:.6;" if any(m["khoan"] is None or not m.get("diem") for m in notes) else ""
+            return (f"<div class='k' style='grid-template-columns:150px minmax(0,1fr)'><b>{E(src_label(s))}{badge}</b><p class='law' style='font-size:.85rem;{old}'>"
+                    f"{E((texts.get(f'{s[0]}|{s[1]}|' + ('' if s[2] is None else str(s[2]))) or '(không có nguyên văn)').split(chr(10), 1)[-1][:2500])}</p></div>")
+        shown = {tuple(x) for x in o.get("sources", [])}
+        srcs = "".join(src_block(s) for s in o.get("sources", []))
+        for m in am:   # the amending clause's text, if the obligation did not already cite it
+            if tuple(m["by"]) in shown: continue
+            shown.add(tuple(m["by"]))
+            t = texts.get(f"{m['by'][0]}|{m['by'][1]}|" + ("" if m["by"][2] is None else str(m["by"][2])), "")
+            srcs += (f"<div class='k' style='grid-template-columns:150px minmax(0,1fr)'><b>{E(src_label(m['by']))}<br><span class='pill ok'>nội dung mới</span></b>"
+                     f"<p class='law' style='font-size:.85rem'>{E(t.split(chr(10), 1)[-1][:3000])}</p></div>")
+        pens = "".join(f"<li>{E(p.get('doc', ''))} Điều {p.get('dieu')}" + (f" khoản {p.get('khoan')}" if p.get('khoan') else "")
+                       + (f" điểm {E(str(p.get('diem')))}" if p.get('diem') else "") + f": {E(p.get('text', ''))}</li>" for p in o.get("penalties") or [])
+        flag = "border-color:var(--warn)" if uns else ""
+        tick = (f"<label class='c' style='float:right'><input type='checkbox' name='exclude' value='{E(o['id'])}'> Loại</label>" if pending else
+                ("<span class='pill no' style='float:right'>đã loại</span>" if o["id"] in excluded else ""))
+        out.append(f"""<div class='panel' style='{flag}'>{tick}<h3 style='margin:0 0 4px'>{E(o['id'])} · {E(o.get('topic', ''))}
+<span class='pill'>{E(o.get('kind', ''))}{(' · ' + E(o['freq'])) if o.get('freq') else ''}</span></h3>
+<div class='grid' style='grid-template-columns:minmax(0,1fr) minmax(0,1fr)'><div>
+<p style='margin:.3rem 0'><b>Nghĩa vụ:</b> {E(o.get('content', ''))}</p>
+<p style='margin:.3rem 0'><b>Hành động:</b> {E(o.get('action', ''))}</p>
+<p style='margin:.3rem 0'><b>Bằng chứng:</b> {E('; '.join(o.get('evidence') or []))}</p>
+<p style='margin:.3rem 0'><b>Áp dụng khi:</b> {E(rule_text(o.get('applies_when')))}</p>
+{f"<p style='margin:.3rem 0'><b>Tính cho DN:</b> {E(o['calc'])}</p>" if o.get('calc') else ''}
+{f"<p style='margin:.3rem 0'><b>Thay đổi:</b> {E(o['change_note'])}</p>" if o.get('change_note') else ''}
+<p style='margin:.3rem 0'><b>Mức phạt:</b></p><ul style='margin:0;font-size:.88rem'>{pens or '<li class=muted>không ghi</li>'}</ul>
+{''.join(f"<p class='err' style='margin:.4rem 0;font-size:.85rem'>Không có trong căn cứ: {E(x)}</p>" for x in uns)}
+{''.join(f"<p class='muted' style='margin:.2rem 0;font-size:.82rem'>Suy diễn: {E(x)}</p>" for x in inf)}
+</div><div style='border-left:1px solid var(--line);padding-left:12px'><p class='muted' style='margin:0 0 4px;font-size:.75rem;text-transform:uppercase'>Nguyên văn căn cứ</p>{srcs}</div></div></div>""")
+    if pending:
+        out.append("""<div class='panel'><h3 style='margin-top:0'>Quyết định</h3><label>Ghi chú (tùy chọn)<br><textarea name='note'></textarea></label>
+<div class='row' style='margin-top:8px'><button name='decision' value='approved'>Duyệt — nạp các nghĩa vụ không bị tick Loại</button>
+<button class='ghost' name='decision' value='rejected'>Từ chối cả đề xuất</button></div>
+<p class='muted' style='font-size:.82rem'>Duyệt chưa ghi gì vào database. Nghĩa vụ chỉ được nạp khi chạy <code>python loader.py apply</code>,
+và được đánh dấu là đã được bạn duyệt — lần chạy agent01 sau sẽ không ghi đè lên chúng.</p></div></form>""")
+    else:
+        out.append(f"<div class='panel'><h3 style='margin-top:0'>Quyết định</h3><p>{lab}" + (f" bởi <b>{E(r[7])}</b> lúc {r[8]}" if r[7] else "")
+                   + (f" · loại {len(excluded)} nghĩa vụ" if excluded else "") + "</p>" + (f"<p class='law'>{E(r[9])}</p>" if r[9] else "")
+                   + (f"<p class='muted' style='font-size:.85rem'>Kết quả nạp: {E(json.dumps(r[10], ensure_ascii=False))}</p>" if r[10] else "") + "</div>")
+    rj = rep.get("rejected", [])
+    if rj:
+        out.append(f"<div class='panel'><details><summary>Bị loại tự động ({len(rj)}) — không được nạp</summary><ul style='font-size:.88rem'>"
+                   + "".join(f"<li><b>{E(x['obligation'].get('id', ''))}</b> {E(x['obligation'].get('content', '')[:160])}<br><span class='err'>{E('; '.join(x['errors']))}</span></li>" for x in rj)
+                   + "</ul></details></div>")
+    nf = rep.get("new_fields", [])
+    if nf:
+        out.append(f"<div class='panel'><details open><summary>Đề nghị thêm trường hồ sơ doanh nghiệp ({len(nf)})</summary><p class='muted' style='font-size:.85rem'>"
+                   "Model gặp điều kiện áp dụng không diễn đạt được bằng các trường hiện có. Thêm trường là việc của người, không phải của agent.</p><ul style='font-size:.88rem'>"
+                   + "".join(f"<li><code>{E(str(x.get('name')))}</code> — {E(str(x.get('meaning', '')))} <span class='muted'>(Điều {x.get('dieu')}: {E(str(x.get('why', '')))})</span></li>" for x in nf)
+                   + "</ul></details></div>")
+    lg = rep.get("log", [])
+    if lg:
+        out.append(f"<div class='panel'><details><summary>Nhật ký agent01 ({len(lg)} điều)</summary><ul style='font-size:.85rem'>" + "".join(f"<li>{E(x)}</li>" for x in lg) + "</ul></details></div>")
+    return page(f"Đề xuất #{pid}", "".join(out), "/proposals")
