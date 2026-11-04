@@ -363,7 +363,12 @@ def proposal(pid: int, err: str = ""):
     if ch:
         items = []
         for x in ch:
-            key = f"Điều {x['key'][0]}" + (f", khoản {x['key'][1]}" if x['key'][1] else "")
+            if x['key'][0] in (None, "None", ""):
+                key = "Dòng dữ liệu mẫu cũ (tạo tay khi dựng pilot, không theo cấu trúc Điều/khoản)"
+            elif str(x['key'][0]).startswith("PL"):
+                key = f"Phụ lục {str(x['key'][0])[2:]}, mục {x['key'][1]}"
+            else:
+                key = f"Điều {x['key'][0]}" + (f", khoản {x['key'][1]}" if x['key'][1] else "")
             if x["change"] == "changed": body = word_diff(x.get("old"), x.get("new"))
             elif x["change"] == "new": body = f"<ins>{E(x.get('new', ''))}</ins>"
             else: body = f"<del>{E(x.get('old', ''))}</del>"
