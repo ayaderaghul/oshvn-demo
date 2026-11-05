@@ -117,6 +117,12 @@ def document(doc_id: int):
         d = conn.execute("SELECT number, title_vi, type, check_report FROM legal_documents WHERE id=%s", (doc_id,)).fetchone()
         if not d:
             raise HTTPException(404)
+        hist = []
+        if conn.execute("SELECT to_regclass('public.load_proposals')").fetchone()[0]:
+            hist = conn.execute("""SELECT id, status, file_name, created_at::timestamp(0), reviewed_by, reviewed_at::timestamp(0), review_note,
+                                          report->'agent'->>'verdict', report->'agent'->>'comment', report->'agent'->>'route', report->'chunks'
+                                   FROM load_proposals WHERE doc_code=%s AND coalesce(to_jsonb(load_proposals)->>'kind','documents')='documents'
+                                   ORDER BY id DESC""", (d[0],)).fetchall()
         rows = conn.execute("""SELECT locator, text FROM chunks WHERE document_id=%s AND source_kind='legal_article' AND NOT coalesce(retired,false)
                                ORDER BY (locator->>'dieu' LIKE 'PL%%'), nullif(regexp_replace(locator->>'dieu','[^0-9]','','g'),'')::int, coalesce((locator->>'khoan')::int, 0), coalesce((locator->>'seq')::int,0)""", (doc_id,)).fetchall()
     arts, order = {}, []
@@ -144,7 +150,17 @@ def document(doc_id: int):
         main.append("</div>")
     checks = "".join(f"<span class='pill {'ok' if c['ok'] else 'no'}' title='{E(c['detail'])}'>{'ĐẠT' if c['ok'] else 'LỖI'} · {E(c['name'])}</span> "
                      for c in (d[3] or []))
-    body = (f"<h1>{E(d[0])}</h1><p class='muted' style='margin:0 0 8px'>{E(d[1] or '')}</p><p>{checks}</p>"
+    hrows = "".join(
+        f"<tr><td><a href='/proposals/{h[0]}'>#{h[0]}</a></td><td><span class='pill {STATUS_VI.get(h[1], ('', ''))[1]}'>{STATUS_VI.get(h[1], (h[1], ''))[0]}</span></td>"
+        f"<td style='font-size:.82rem'>{E(h[2] or '')}<br><span class='muted'>{h[3]}</span></td>"
+        f"<td style='font-size:.82rem'>{(h[10] or {}).get('new', 0)} mới / {(h[10] or {}).get('changed', 0)} đổi / {(h[10] or {}).get('retired', 0)} ngừng</td>"
+        + agent_cell(h[7], h[8], h[9], full=True)
+        + f"<td style='font-size:.82rem'>{E(h[4] or '—')}<br><span class='muted'>{h[5] or ''}</span>"
+        + (f"<br><i>{E(h[6])}</i>" if h[6] else "") + "</td></tr>" for h in hist)
+    history = (f"<div class='panel'><details><summary>Lịch sử nạp và duyệt ({len(hist)} đề xuất) — nhận xét của agent và người duyệt</summary>"
+               f"<div class='scroll'><table><tr><th>#</th><th>Trạng thái</th><th>File</th><th>Thay đổi</th><th style='min-width:280px'>Nhận xét của agent</th><th>Người duyệt</th></tr>"
+               f"{hrows}</table></div></details></div>") if hist else ""
+    body = (f"<h1>{E(d[0])}</h1><p class='muted' style='margin:0 0 8px'>{E(d[1] or '')}</p><p>{checks}</p>{history}"
             f"<div class='grid'><div class='panel toc'>{''.join(toc)}</div><div class='panel'>{''.join(main) or '<p class=muted>Chưa có khoản nào.</p>'}</div></div>")
     return page(d[0], body, "/")
 
@@ -283,13 +299,13 @@ def word_diff(old, new):
 VERDICT_VI = {"ok": ("có thể duyệt", "ok"), "check": ("cần xem kỹ", "no"), "reject": ("không nên nạp", "no")}
 
 
-def agent_cell(verdict, comment, route):
+def agent_cell(verdict, comment, route, full=False):
     if not verdict:
         return "<td class='muted' style='font-size:.82rem'>— (tạo bằng loader.py propose)</td>"
     lab, cls = VERDICT_VI.get(verdict, (verdict, ""))
     how = {"ocr": "bản scan · OCR + Claude đọc ảnh", "parse": "file có chữ"}.get(route or "", route or "")
     text = comment or ""
-    short = E(text[:260]) + ("…" if len(text) > 260 else "")
+    short = E(text) if full else E(text[:260]) + ("…" if len(text) > 260 else "")
     return (f"<td style='font-size:.85rem'><span class='pill {cls}'>{lab}</span> <span class='muted'>{E(how)}</span><br>{short}</td>")
 
 
@@ -338,13 +354,17 @@ def proposal(pid: int, err: str = ""):
         exists = conn.execute("SELECT id FROM legal_documents WHERE number=%s", (r[2],)).fetchone()
     rep, chunks = r[5] or {}, r[6] or []
     lab, cls = STATUS_VI.get(r[1], (r[1], ""))
+    # What the database held when the proposal was made (stored in the report), not what it holds now:
+    # the page must read the same before and after review / apply, so it can be checked later (QC).
+    was_new = rep.get("document") == "mới" if rep.get("document") else not exists
     c = rep.get("chunks", {})
     out = [f"<p><a href='/proposals'>← Danh sách đề xuất</a></p><div class='eyebrow'>Đề xuất #{r[0]}</div>",
            f"<h1>{E(r[2])} <span class='pill {cls}' style='font-size:.8rem;vertical-align:middle'>{lab}</span></h1>",
            f"<p class='muted' style='margin:0 0 10px'>{E(r[7] or '')}</p>",
            f"<p class='muted' style='font-size:.85rem'>File {E(r[3] or '')} · tạo {r[8]} bởi {E(r[9] or '?')} · "
            f"tùy chọn: {E(json.dumps({k: v for k, v in (r[4] or {}).items() if v}, ensure_ascii=False))} · "
-           + (f"<a href='/doc/{exists[0]}'>bản đang có trong database</a>" if exists else "văn bản mới, chưa có trong database") + "</p>"]
+           + ("lúc đề xuất: văn bản mới, chưa có trong database" if was_new else "lúc đề xuất: văn bản đã có, đây là bản cập nhật")
+           + (f" · <a href='/doc/{exists[0]}'>xem bản hiện có trong database</a>" if exists else "") + "</p>"]
     if err:
         out.append(f"<p class='err'>{E(err)}</p>")
     out.append(f"<div class='kpis' style='margin-bottom:12px'><div class='kpi'><b>{c.get('new', 0)}</b>khoản mới</div>"
@@ -393,7 +413,7 @@ def proposal(pid: int, err: str = ""):
             tag = {"changed": "đổi chữ", "new": "mới", "retired": "ngừng dùng"}[x["change"]]
             items.append(f"<div class='art'><b>{E(key)}</b> <span class='pill'>{tag}</span><p class='law' style='font-size:.92rem'>{body}</p></div>")
         out.append(f"<div class='panel'><h3 style='margin-top:0'>2. Thay đổi so với database ({len(ch)})</h3>{''.join(items)}</div>")
-    elif exists:
+    elif not was_new:
         out.append("<div class='panel'><h3 style='margin-top:0'>2. Thay đổi so với database</h3><p class='muted'>Không có khoản nào đổi chữ.</p></div>")
     # 3. parser notes
     iss = rep.get("issues") or []
@@ -413,7 +433,7 @@ def proposal(pid: int, err: str = ""):
         parts = "".join(f"<div class='k'><b>{E(x.get('item_label') or (('Khoản ' + str(x['khoan'])) if x.get('khoan') else 'Đoạn'))}</b>"
                         f"<p class='law'>{E(x.get('text', ''))}</p></div>" for x in byd[k])
         arts.append(f"<div class='art'><h3>{E(head)}</h3>{parts}</div>")
-    out.append(f"<div class='panel'><details{' open' if not exists else ''}><summary>4. Toàn văn đã tách ({len(order)} điều/phụ lục, {len(chunks)} khoản)</summary>{''.join(arts)}</details></div>")
+    out.append(f"<div class='panel'><details{' open' if was_new else ''}><summary>4. Toàn văn đã tách ({len(order)} điều/phụ lục, {len(chunks)} khoản)</summary>{''.join(arts)}</details></div>")
     # 5. decision
     if r[1] == "pending":
         tok = csrf_token(pid)
