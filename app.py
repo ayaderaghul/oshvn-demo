@@ -169,7 +169,9 @@ def document(doc_id: int):
                                    FROM load_proposals WHERE doc_code=%s AND coalesce(to_jsonb(load_proposals)->>'kind','documents')='documents'
                                    ORDER BY id DESC""", (d[0],)).fetchall()
         rows = conn.execute("""SELECT locator, text FROM chunks WHERE document_id=%s AND source_kind='legal_article' AND NOT coalesce(retired,false)
-                               ORDER BY (locator->>'dieu' LIKE 'PL%%'), nullif(regexp_replace(locator->>'dieu','[^0-9]','','g'),'')::int, coalesce((locator->>'khoan')::int, 0), coalesce((locator->>'seq')::int,0)""", (doc_id,)).fetchall()
+                               ORDER BY (locator->>'dieu' LIKE 'PL%%'), nullif(regexp_replace(locator->>'dieu','[^0-9]','','g'),'')::numeric,
+                                        coalesce(nullif(regexp_replace(locator->>'khoan','[^0-9]','','g'),'')::numeric, 0),
+                                        coalesce(nullif(regexp_replace(locator->>'seq','[^0-9]','','g'),'')::numeric, 0)""", (doc_id,)).fetchall()
     arts, order = {}, []
     for loc, text in rows:
         key = loc.get("dieu")
@@ -328,7 +330,8 @@ def runs():
         rep = r[5] or {}
         det = rep.get("file", "")
         if "chunks" in rep:
-            c = rep["chunks"]; det += f" — {c['new']} mới, {c['changed']} đổi, {c['unchanged']} không đổi, {c['retired']} ngừng"
+            c = rep["chunks"] if isinstance(rep["chunks"], dict) else {}
+            det += f" — {c.get('new', 0)} mới, {c.get('changed', 0)} đổi, {c.get('unchanged', 0)} không đổi, {c.get('retired', 0)} ngừng"
         if rep.get("reason"): det += f" — {rep['reason']}"
         cls = {"applied": "ok", "rejected": "no", "dry_run": ""}.get(r[2], "")
         t.append(f"<tr><td>{r[0]}</td><td>{E(r[1])}</td><td><span class='pill {cls}'>{E(r[2])}</span></td><td>{r[3]}</td><td>{E(r[4] or '')}</td><td style='font-size:.85rem'>{E(det)}</td></tr>")
@@ -395,13 +398,11 @@ def proposals():
          "Duyệt ở đây, rồi chạy <code>python loader.py apply</code> để nạp.</p><div class='panel scroll'><table>"
          "<tr><th>#</th><th>Trạng thái</th><th>Văn bản</th><th>Thay đổi</th><th style='min-width:280px'>Nhận xét của agent</th><th>Ngoại lệ</th><th>Tạo</th><th>Duyệt</th></tr>"]
     for r in rows:
-        lab, cls = STATUS_VI.get(r[1], (r[1], ""))
-        c = r[7] or {}
-        t.append(f"<tr><td><a href='/proposals/{r[0]}'>#{r[0]}</a></td><td><span class='pill {cls}'>{lab}</span></td>"
+        t.append(f"<tr><td><a href='/proposals/{r[0]}'>#{r[0]}</a></td><td>{status_pill(r[1])}</td>"
                  f"<td><a href='/proposals/{r[0]}'><b>{E(r[2])}</b></a><br><span class='muted' style='font-size:.8rem'>{E(r[3] or '')}</span></td>"
                  + (f"<td><b>{r[14]}</b> nghĩa vụ</td><td style='font-size:.85rem'><span class='pill'>agent01</span> "
-                    f"{r[14]} đạt kiểm tra · {r[15]} bị loại · <b>{r[16] or 0}</b> có ý không có căn cứ</td>" if r[13] == "obligations" else
-                    f"<td>{c.get('new', 0)} mới / {c.get('changed', 0)} đổi / {c.get('retired', 0)} ngừng</td>" + agent_cell(r[10], r[11], r[12])) +
+                    f"{r[14]} đạt kiểm tra · {r[15]} bị loại · <b>{E(str(r[16] or 0))}</b> có ý không có căn cứ</td>" if r[13] == "obligations" else
+                    f"<td>{counts(r[7])}</td>" + agent_cell(r[10], r[11], r[12])) +
                  f"<td style='font-size:.82rem'>{E(', '.join(x.split(':')[0] for x in (r[8] or []))) or '—'}<br><span class='muted'>{r[9]} ghi chú parser</span></td>"
                  f"<td style='font-size:.82rem'>{r[4]}<br>{E(r[5] or '')}</td><td>{E(r[6] or '')}</td></tr>")
     t.append("</table></div>" if rows else "<tr><td colspan=8 class='muted'>Chưa có đề xuất nào.</td></tr></table></div>")
@@ -423,32 +424,32 @@ def proposal(pid: int, err: str = ""):
             raise HTTPException(404)
         exists = conn.execute("SELECT id FROM legal_documents WHERE number=%s", (r[2],)).fetchone()
     rep, chunks = r[5] or {}, r[6] or []
-    lab, cls = STATUS_VI.get(r[1], (r[1], ""))
+    lab = STATUS_VI.get(r[1], (str(r[1]), ""))[0]
     # What the database held when the proposal was made (stored in the report), not what it holds now:
     # the page must read the same before and after review / apply, so it can be checked later (QC).
     was_new = rep.get("document") == "mới" if rep.get("document") else not exists
-    c = rep.get("chunks", {})
+    c = rep.get("chunks") if isinstance(rep.get("chunks"), dict) else {}
     out = [f"<p><a href='/proposals'>← Danh sách đề xuất</a></p><div class='eyebrow'>Đề xuất #{r[0]}</div>",
-           f"<h1>{E(r[2])} <span class='pill {cls}' style='font-size:.8rem;vertical-align:middle'>{lab}</span></h1>",
+           f"<h1>{E(r[2])} {status_pill(r[1])}</h1>",
            f"<p class='muted' style='margin:0 0 10px'>{E(r[7] or '')}</p>",
            f"<p class='muted' style='font-size:.85rem'>File {E(r[3] or '')} · tạo {r[8]} bởi {E(r[9] or '?')} · "
            f"tùy chọn: {E(json.dumps({k: v for k, v in (r[4] or {}).items() if v}, ensure_ascii=False))} · "
            + ("lúc đề xuất: văn bản mới, chưa có trong database" if was_new else "lúc đề xuất: văn bản đã có, đây là bản cập nhật")
            + (f" · <a href='/doc/{exists[0]}'>xem bản hiện có trong database</a>" if exists else "") + "</p>"]
-    if err:
-        out.append(f"<p class='err'>{E(err)}</p>")
-    out.append(f"<div class='kpis' style='margin-bottom:12px'><div class='kpi'><b>{c.get('new', 0)}</b>khoản mới</div>"
-               f"<div class='kpi'><b>{c.get('changed', 0)}</b>đổi chữ</div><div class='kpi'><b>{c.get('unchanged', 0)}</b>không đổi</div>"
-               f"<div class='kpi'><b>{c.get('retired', 0)}</b>ngừng dùng</div></div>")
+    if err in REVIEW_ERRORS:
+        out.append(f"<p class='err'>{E(REVIEW_ERRORS[err])}</p>")
+    out.append(f"<div class='kpis' style='margin-bottom:12px'><div class='kpi'><b>{E(str(c.get('new', 0)))}</b>khoản mới</div>"
+               f"<div class='kpi'><b>{E(str(c.get('changed', 0)))}</b>đổi chữ</div><div class='kpi'><b>{E(str(c.get('unchanged', 0)))}</b>không đổi</div>"
+               f"<div class='kpi'><b>{E(str(c.get('retired', 0)))}</b>ngừng dùng</div></div>")
     # 0. agent00's notes (if the proposal came from the agent)
     ag = rep.get("agent")
     if ag:
         vlab, vcls = {"ok": ("có thể duyệt", "ok"), "check": ("cần xem kỹ", "no"), "reject": ("không nên nạp", "no")}.get(ag.get("verdict"), ("?", ""))
         o = ag.get("ocr") or {}
-        nc = "".join(f"<tr><td>trang {x['page']}</td><td><del>{E(', '.join(x['removed']))}</del></td><td><ins>{E(', '.join(x['added']))}</ins></td></tr>"
-                     for x in o.get("number_changes", []))
-        uns = "".join(f"<li>trang {u['page']}: {E(u['note'])}</li>" for u in o.get("unsure", []))
-        low = ", ".join(f"{E(w['word'])} <span class='muted'>(tr.{w['page']})</span>" for w in o.get("low_conf", [])[:60])
+        nc = "".join(f"<tr><td>trang {E(str(x.get('page')))}</td><td><del>{E(', '.join(map(str, x.get('removed') or [])))}</del></td>"
+                     f"<td><ins>{E(', '.join(map(str, x.get('added') or [])))}</ins></td></tr>" for x in o.get("number_changes", []))
+        uns = "".join(f"<li>trang {E(str(u.get('page')))}: {E(str(u.get('note', '')))}</li>" for u in o.get("unsure", []))
+        low = ", ".join(f"{E(str(w.get('word', '')))} <span class='muted'>(tr.{E(str(w.get('page')))})</span>" for w in o.get("low_conf", [])[:60])
         out.append(f"<div class='panel' style='border-color:var(--accent)'><h3 style='margin-top:0'>Nhận xét của agent00 "
                    f"<span class='pill {vcls}'>{vlab}</span></h3><p>{E(ag.get('comment', ''))}</p>"
                    f"<details><summary>Các bước agent đã làm ({len(ag.get('steps', []))})</summary><ol style='font-size:.88rem'>"
@@ -459,7 +460,7 @@ def proposal(pid: int, err: str = ""):
                       + (f"<details><summary>Từ OCR độ tin cậy thấp ({len(o.get('low_conf', []))})</summary><p style='font-size:.85rem'>{low}</p></details>" if low else "")
                       if o else "")
                    + f"<p class='muted' style='font-size:.78rem;margin-bottom:0'>{E(ag.get('agent', ''))} · {E(ag.get('provider', ''))}/{E(ag.get('model', ''))} · "
-                     f"{ag.get('calls', 0)} lần gọi · {ag.get('tokens', 0)} token. Nhận xét chỉ để tham khảo; kiểm tra tự động và người duyệt mới là quyết định.</p></div>")
+                     f"{E(str(ag.get('calls', 0)))} lần gọi · {E(str(ag.get('tokens', 0)))} token. Nhận xét chỉ để tham khảo; kiểm tra tự động và người duyệt mới là quyết định.</p></div>")
     # 1. checks
     acc = set(rep.get("accepted") or [])
     rows = "".join(f"<tr><td>{'<span class=\"pill ok\">ĐẠT</span>' if ch['ok'] else ('<span class=\"pill no\">LỖI · chấp nhận</span>' if ch['name'] in acc else '<span class=\"pill no\">LỖI</span>')}</td>"
@@ -480,7 +481,7 @@ def proposal(pid: int, err: str = ""):
             if x["change"] == "changed": body = word_diff(x.get("old"), x.get("new"))
             elif x["change"] == "new": body = f"<ins>{E(x.get('new', ''))}</ins>"
             else: body = f"<del>{E(x.get('old', ''))}</del>"
-            tag = {"changed": "đổi chữ", "new": "mới", "retired": "ngừng dùng"}[x["change"]]
+            tag = E({"changed": "đổi chữ", "new": "mới", "retired": "ngừng dùng"}.get(x.get("change"), str(x.get("change"))))
             items.append(f"<div class='art'><b>{E(key)}</b> <span class='pill'>{tag}</span><p class='law' style='font-size:.92rem'>{body}</p></div>")
         out.append(f"<div class='panel'><h3 style='margin-top:0'>2. Thay đổi so với database ({len(ch)})</h3>{''.join(items)}</div>")
     elif not was_new:
@@ -514,18 +515,27 @@ def proposal(pid: int, err: str = ""):
 <button class='ghost' name='decision' value='rejected'>Từ chối</button></div>
 <p class='muted' style='font-size:.82rem'>Duyệt chưa ghi gì vào database. Văn bản chỉ được nạp khi chạy <code>python loader.py apply</code>.</p></form></div>""")
     else:
-        out.append(f"<div class='panel'><h3 style='margin-top:0'>5. Quyết định</h3><p>{lab}"
+        out.append(f"<div class='panel'><h3 style='margin-top:0'>5. Quyết định</h3><p>{E(lab)}"
                    + (f" bởi <b>{E(r[10])}</b> lúc {r[11]}" if r[10] else "") + "</p>"
                    + (f"<p class='law'>{E(r[12])}</p>" if r[12] else "")
                    + (f"<p class='muted' style='font-size:.85rem'>Kết quả nạp: {E(json.dumps(r[13], ensure_ascii=False))}</p>" if r[13] else "") + "</div>")
     return page(f"Đề xuất #{pid}", "".join(out), "/proposals")
 
 
+REVIEW_ERRORS = {"name": "Đăng nhập với tên của bạn (ô tên đăng nhập) để ghi người duyệt.",
+                 "db": "Không ghi được quyết định: đề xuất có thể đã được duyệt hoặc bị thay thế. Tải lại trang."}
+
+
+def same_origin(request):
+    """A form post from this site: browsers send Origin (or at least Referer) on POST, and it must name this host."""
+    src = request.headers.get("origin") or request.headers.get("referer")
+    return bool(src) and urlsplit(src).netloc == request.headers.get("host")
+
+
 @app.post("/proposals/{pid}/review")
 async def review(pid: int, request: Request, user: str = Depends(auth)):
     form = await request.form()
-    origin = request.headers.get("origin")
-    if origin and origin.split("://", 1)[-1] != request.headers.get("host"):
+    if not same_origin(request):
         raise HTTPException(403, "Sai nguồn gửi")
     if not hmac.compare_digest(str(form.get("token", "")), csrf_token(pid)):
         raise HTTPException(403, "Mã xác nhận không đúng — tải lại trang rồi thử lại")
@@ -533,19 +543,29 @@ async def review(pid: int, request: Request, user: str = Depends(auth)):
     if decision not in ("approved", "rejected"):
         raise HTTPException(400)
     if not user:
-        return RedirectResponse(f"/proposals/{pid}?err=" + quote("Đăng nhập với tên của bạn (ô tên đăng nhập) để ghi người duyệt."), 303)
-    url = os.environ.get("DATABASE_URL")
+        return RedirectResponse(f"/proposals/{pid}?err=name", 303)
+    note, excl = str(form.get("note", ""))[:2000], sorted({str(x) for x in form.getlist("exclude")})
+    return await run_in_threadpool(record_review, pid, decision, user, note, excl)
+
+
+def record_review(pid, decision, user, note, excl):
     try:
-        with psycopg.connect(url, autocommit=True, connect_timeout=15) as conn:   # the only write this app makes
-            if form.get("items") == "1":   # obligations proposal: reviewer may drop single obligations
-                excl = [x for x in form.getlist("exclude") if re.fullmatch(r"[A-Za-z0-9.\-]{1,40}", str(x))]
-                conn.execute("SELECT review_proposal_items(%s, %s, %s, %s, %s::jsonb)",
-                             (pid, decision, user, str(form.get("note", ""))[:2000], json.dumps(excl)))
+        with writer() as conn:
+            row = conn.execute("SELECT coalesce(to_jsonb(lp)->>'kind','documents'), payload FROM load_proposals lp WHERE id=%s", (pid,)).fetchone()
+            if not row:
+                raise HTTPException(404)
+            if row[0] == "obligations":   # the stored kind decides, not a field of the form
+                ids = {str(o.get("id")) for o in (row[1] or {}).get("obligations", []) if isinstance(o, dict)}
+                unknown = [x for x in excl if x not in ids]
+                if unknown:
+                    raise HTTPException(400, "Mã nghĩa vụ không có trong đề xuất: " + ", ".join(unknown[:5]))
+                conn.execute("SELECT review_proposal_items(%s, %s, %s, %s, %s::jsonb)", (pid, decision, user, note, json.dumps(excl)))
+            elif excl:
+                raise HTTPException(400, "Đề xuất văn bản không loại được từng mục")
             else:
-                conn.execute("SELECT review_proposal(%s, %s, %s, %s)", (pid, decision, user, str(form.get("note", ""))[:2000]))
-    except psycopg.Error as e:
-        msg = (e.diag.message_primary if getattr(e, "diag", None) else None) or "không ghi được quyết định"
-        return RedirectResponse(f"/proposals/{pid}?err=" + quote(msg), 303)
+                conn.execute("SELECT review_proposal(%s, %s, %s, %s)", (pid, decision, user, note))
+    except psycopg.Error:
+        return RedirectResponse(f"/proposals/{pid}?err=db", 303)
     return RedirectResponse(f"/proposals/{pid}", 303)
 
 
@@ -579,21 +599,23 @@ def obligation_proposal(pid, err):
     if not r: raise HTTPException(404)
     payload, rep = r[3] or {}, r[4] or {}
     obls, texts, excluded = payload.get("obligations", []), payload.get("texts", {}), set(r[11] or [])
-    lab, cls = STATUS_VI.get(r[1], (r[1], ""))
+    lab = STATUS_VI.get(r[1], (str(r[1]), ""))[0]
     ag = rep.get("agent", {})
     pending = r[1] == "pending"
+    tokens = ag.get("tokens", 0)
     out = [f"<p><a href='/proposals'>← Danh sách đề xuất</a></p><div class='eyebrow'>Đề xuất #{r[0]} · nghĩa vụ</div>",
-           f"<h1>{E(r[2])} <span class='pill {cls}' style='font-size:.8rem;vertical-align:middle'>{lab}</span></h1>",
+           f"<h1>{E(r[2])} {status_pill(r[1])}</h1>",
            f"<p class='muted' style='font-size:.85rem'>Tạo {r[5]} bởi {E(r[6] or '?')} · {E(ag.get('agent', ''))} · soạn bằng {E(ag.get('draft_model', ''))}, "
-           f"lọc và kiểm chứng bằng {E(ag.get('filter_model', ''))} · {ag.get('calls', 0)} lần gọi · {ag.get('tokens', 0):,} token</p>"]
-    if err: out.append(f"<p class='err'>{E(err)}</p>")
+           f"lọc và kiểm chứng bằng {E(ag.get('filter_model', ''))} · {E(str(ag.get('calls', 0)))} lần gọi · "
+           f"{E(f'{tokens:,}' if isinstance(tokens, int) else str(tokens))} token</p>"]
+    if err in REVIEW_ERRORS: out.append(f"<p class='err'>{E(REVIEW_ERRORS[err])}</p>")
     out.append(f"<div class='kpis' style='margin-bottom:12px'><div class='kpi'><b>{len(obls)}</b>nghĩa vụ đạt kiểm tra</div>"
-               f"<div class='kpi'><b>{rep.get('flagged', 0)}</b>có ý không có căn cứ</div><div class='kpi'><b>{len(rep.get('rejected', []))}</b>bị loại tự động</div>"
+               f"<div class='kpi'><b>{E(str(rep.get('flagged', 0)))}</b>có ý không có căn cứ</div><div class='kpi'><b>{len(rep.get('rejected', []))}</b>bị loại tự động</div>"
                f"<div class='kpi'><b>{len(rep.get('new_fields', []))}</b>đề nghị trường hồ sơ mới</div></div>")
     out.append("<div class='panel' style='font-size:.9rem'><b>Cách duyệt.</b> Mỗi nghĩa vụ đặt cạnh nguyên văn căn cứ. Đọc nội dung, điều kiện áp dụng và mức phạt; "
                "ý có viền vàng là ý model kiểm chứng cho là <b>không có trong căn cứ</b>. Nghĩa vụ chưa ổn thì tick <b>Loại</b>; phần còn lại được nạp khi duyệt.</div>")
     if pending:
-        out.append(f"<form method='post' action='/proposals/{pid}/review'><input type='hidden' name='token' value='{csrf_token(pid)}'><input type='hidden' name='items' value='1'>")
+        out.append(f"<form method='post' action='/proposals/{pid}/review'><input type='hidden' name='token' value='{csrf_token(pid)}'>")
     for o in obls:
         v = o.get("_verify") or {}
         uns, inf = v.get("unsupported") or [], v.get("inferred") or []
@@ -612,7 +634,7 @@ def obligation_proposal(pid, err):
             t = texts.get(f"{m['by'][0]}|{m['by'][1]}|" + ("" if m["by"][2] is None else str(m["by"][2])), "")
             srcs += (f"<div class='k' style='grid-template-columns:150px minmax(0,1fr)'><b>{E(src_label(m['by']))}<br><span class='pill ok'>nội dung mới</span></b>"
                      f"<p class='law' style='font-size:.85rem'>{E(t.split(chr(10), 1)[-1][:3000])}</p></div>")
-        pens = "".join(f"<li>{E(p.get('doc', ''))} Điều {p.get('dieu')}" + (f" khoản {p.get('khoan')}" if p.get('khoan') else "")
+        pens = "".join(f"<li>{E(str(p.get('doc', '')))} Điều {E(str(p.get('dieu')))}" + (f" khoản {E(str(p.get('khoan')))}" if p.get('khoan') else "")
                        + (f" điểm {E(str(p.get('diem')))}" if p.get('diem') else "") + f": {E(p.get('text', ''))}</li>" for p in o.get("penalties") or [])
         flag = "border-color:var(--warn)" if uns else ""
         tick = (f"<label class='c' style='float:right'><input type='checkbox' name='exclude' value='{E(o['id'])}'> Loại</label>" if pending else
@@ -637,7 +659,7 @@ def obligation_proposal(pid, err):
 <p class='muted' style='font-size:.82rem'>Duyệt chưa ghi gì vào database. Nghĩa vụ chỉ được nạp khi chạy <code>python loader.py apply</code>,
 và được đánh dấu là đã được bạn duyệt — lần chạy agent01 sau sẽ không ghi đè lên chúng.</p></div></form>""")
     else:
-        out.append(f"<div class='panel'><h3 style='margin-top:0'>Quyết định</h3><p>{lab}" + (f" bởi <b>{E(r[7])}</b> lúc {r[8]}" if r[7] else "")
+        out.append(f"<div class='panel'><h3 style='margin-top:0'>Quyết định</h3><p>{E(lab)}" + (f" bởi <b>{E(r[7])}</b> lúc {r[8]}" if r[7] else "")
                    + (f" · loại {len(excluded)} nghĩa vụ" if excluded else "") + "</p>" + (f"<p class='law'>{E(r[9])}</p>" if r[9] else "")
                    + (f"<p class='muted' style='font-size:.85rem'>Kết quả nạp: {E(json.dumps(r[10], ensure_ascii=False))}</p>" if r[10] else "") + "</div>")
     rj = rep.get("rejected", [])
@@ -649,7 +671,7 @@ và được đánh dấu là đã được bạn duyệt — lần chạy agent
     if nf:
         out.append(f"<div class='panel'><details open><summary>Đề nghị thêm trường hồ sơ doanh nghiệp ({len(nf)})</summary><p class='muted' style='font-size:.85rem'>"
                    "Model gặp điều kiện áp dụng không diễn đạt được bằng các trường hiện có. Thêm trường là việc của người, không phải của agent.</p><ul style='font-size:.88rem'>"
-                   + "".join(f"<li><code>{E(str(x.get('name')))}</code> — {E(str(x.get('meaning', '')))} <span class='muted'>(Điều {x.get('dieu')}: {E(str(x.get('why', '')))})</span></li>" for x in nf)
+                   + "".join(f"<li><code>{E(str(x.get('name')))}</code> — {E(str(x.get('meaning', '')))} <span class='muted'>(Điều {E(str(x.get('dieu')))}: {E(str(x.get('why', '')))})</span></li>" for x in nf)
                    + "</ul></details></div>")
     lg = rep.get("log", [])
     if lg:
@@ -672,59 +694,76 @@ def _tokens(t):
     return [x for x in w if x not in STOP] + [a + "_" + b for a, b in zip(w, w[1:])]
 
 
+Snapshot = namedtuple("Snapshot", "stamp rows tf lens avg idf")
+# load_run_id moves on every in-place text change and every retire / revive, which count and max(id) do not see
+STAMP_SQL = "SELECT count(*), max(id), max(load_run_id) FROM chunks WHERE source_kind='legal_article' AND NOT coalesce(retired,false)"
+
+
 class Index:
-    """In-memory BM25 over every live clause. Rebuilt when the database changes (new load run)."""
+    """In-memory BM25 over every live clause. Rebuilt when the database changes. A search reads one immutable
+    snapshot, so a rebuild running at the same time can never mix two builds."""
     def __init__(self):
-        self.lock, self.stamp, self.rows = threading.Lock(), None, []
+        self.lock, self.snap = threading.Lock(), Snapshot(None, [], [], [], 1, {})
 
     def ensure(self, conn):
-        stamp = conn.execute("SELECT count(*), max(id) FROM chunks WHERE source_kind='legal_article' AND NOT coalesce(retired,false)").fetchone()
-        if stamp == self.stamp: return
+        if tuple(conn.execute(STAMP_SQL).fetchone()) == self.snap.stamp: return
         with self.lock:
+            stamp = tuple(conn.execute(STAMP_SQL).fetchone())
+            if stamp == self.snap.stamp: return   # another request rebuilt it while this one waited
             rows = conn.execute("""SELECT d.id, d.number, c.locator, c.text FROM chunks c JOIN legal_documents d ON d.id=c.document_id
                                    WHERE c.source_kind='legal_article' AND NOT coalesce(c.retired,false)""").fetchall()
-            self.rows = rows
-            self.tf = [Counter(_tokens(r[3])) for r in rows]
-            self.len = [sum(t.values()) for t in self.tf]; self.avg = (sum(self.len) / len(self.len)) if rows else 1
-            df = Counter(t for tf in self.tf for t in tf); N = len(rows)
-            self.idf = {t: math.log(1 + (N - n + .5) / (n + .5)) for t, n in df.items()}
-            self.stamp = stamp
+            tf = [Counter(_tokens(r[3])) for r in rows]
+            lens = [sum(t.values()) for t in tf]
+            df = Counter(t for x in tf for t in x); N = len(rows)
+            self.snap = Snapshot(stamp, rows, tf, lens, (sum(lens) / len(lens)) if rows else 1,
+                                 {t: math.log(1 + (N - n + .5) / (n + .5)) for t, n in df.items()})
 
-    def search(self, q, k=12, k1=1.2, b=0.75):
-        qt = set(_tokens(q)); sc = []
-        for i, tf in enumerate(self.tf):
-            s = sum(self.idf[t] * tf[t] * (k1 + 1) / (tf[t] + k1 * (1 - b + b * self.len[i] / self.avg)) for t in qt if t in tf)
-            if s > 0: sc.append((s, i))
-        return [(s, self.rows[i]) for s, i in sorted(sc, reverse=True)[:k]]
+    def search(self, q, k=12, doc="", k1=1.2, b=0.75):
+        s, qt, sc = self.snap, set(_tokens(q)), []
+        for i, tf in enumerate(s.tf):
+            if doc and s.rows[i][1] != doc: continue   # filter before ranking: a small document is not crowded out
+            v = sum(s.idf[t] * tf[t] * (k1 + 1) / (tf[t] + k1 * (1 - b + b * s.lens[i] / s.avg)) for t in qt if t in tf)
+            if v > 0: sc.append((v, i))
+        return [(v, s.rows[i]) for v, i in sorted(sc, reverse=True)[:k]]
 
 
 INDEX = Index()
 
 
-def vector_search(conn, q, k=30):
-    """Semantic search with Voyage AI + pgvector, if the clauses have Voyage vectors and VOYAGE_API_KEY is set.
-    Returns (rows, note). The question is embedded with the SAME model that embedded the clauses."""
-    key = os.environ.get("VOYAGE_API_KEY")
+def vector_model(conn):
+    """(model, None) when the clauses have Voyage vectors and VOYAGE_API_KEY is set, else (None, why not)."""
     models = [r[0] for r in conn.execute("SELECT DISTINCT embedding_model FROM chunks WHERE embedding IS NOT NULL").fetchall()]
     if not models:
-        return [], "chưa có vector (chạy loader.py embed) — chỉ tìm theo từ khóa"
-    if len(models) > 1 or not models[0].startswith("voyage:"):
-        return [], f"vector trong database là {models}, trang này chỉ dùng vector Voyage — chỉ tìm theo từ khóa"
-    if not key:
-        return [], "chưa đặt VOYAGE_API_KEY trên Render — chỉ tìm theo từ khóa"
-    model = models[0].split(":", 1)[1]
+        return None, "chưa có vector (chạy loader.py embed) — chỉ tìm theo từ khóa"
+    if len(models) > 1 or not str(models[0]).startswith("voyage:"):
+        return None, f"vector trong database là {models}, trang này chỉ dùng vector Voyage — chỉ tìm theo từ khóa"
+    if not os.environ.get("VOYAGE_API_KEY"):
+        return None, "chưa đặt VOYAGE_API_KEY trên Render — chỉ tìm theo từ khóa"
+    return models[0].split(":", 1)[1], None
+
+
+def embed_query(q, model):
+    """The question embedded with the SAME model that embedded the clauses. Called with no database connection open."""
     body = json.dumps({"input": [q], "model": model, "input_type": "query", "output_dimension": 1024}).encode()
     req = urllib.request.Request(os.environ.get("VOYAGE_API_BASE", "https://api.voyageai.com") + "/v1/embeddings", body,
-                                 {"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+                                 {"Authorization": f"Bearer {os.environ.get('VOYAGE_API_KEY')}", "Content-Type": "application/json"})
     try:
-        vec = json.load(urllib.request.urlopen(req, timeout=30))["data"][0]["embedding"]
+        return json.load(urllib.request.urlopen(req, timeout=15))["data"][0]["embedding"], None
     except Exception as e:
-        return [], f"Voyage API lỗi ({str(e)[:120]}) — chỉ tìm theo từ khóa"
-    rows = conn.execute("""SELECT d.id, d.number, c.locator, c.text, 1 - (c.embedding <=> %s::vector) AS sim
-                           FROM chunks c JOIN legal_documents d ON d.id=c.document_id
-                           WHERE c.source_kind='legal_article' AND NOT coalesce(c.retired,false) AND c.embedding IS NOT NULL
-                           ORDER BY c.embedding <=> %s::vector LIMIT %s""",
-                        ("[" + ",".join(f"{x:.6f}" for x in vec) + "]",) * 2 + (k,)).fetchall()
+        return None, f"Voyage API lỗi ({str(e)[:120]}) — chỉ tìm theo từ khóa"
+
+
+def vector_rows(conn, vec, model, doc="", k=30):
+    try:
+        rows = conn.execute("""SELECT d.id, d.number, c.locator, c.text, 1 - (c.embedding <=> %s::vector) AS sim
+                               FROM chunks c JOIN legal_documents d ON d.id=c.document_id
+                               WHERE c.source_kind='legal_article' AND NOT coalesce(c.retired,false) AND c.embedding IS NOT NULL
+                                 AND (%s = '' OR d.number = %s)
+                               ORDER BY c.embedding <=> %s::vector LIMIT %s""",
+                            ("[" + ",".join(f"{x:.6f}" for x in vec) + "]", doc, doc) + ("[" + ",".join(f"{x:.6f}" for x in vec) + "]", k)).fetchall()
+    except (psycopg.Error, TypeError, ValueError) as e:
+        conn.rollback()
+        return [], f"tìm theo nghĩa lỗi ({str(e)[:120]}) — chỉ tìm theo từ khóa"
     return rows, f"từ khóa (BM25) + theo nghĩa ({model})"
 
 
@@ -737,7 +776,31 @@ def fuse(bm25_hits, vec_rows, k=12):
         key = (r[1], json.dumps(r[2], sort_keys=True)); score[key] = score.get(key, 0) + 1 / (60 + rank); row.setdefault(key, r[:4]); how.setdefault(key, set()).add("theo nghĩa")
     best = sorted(score, key=lambda x: -score[x])[:k]
     return [(score[x] * 1000, row[x], " + ".join(sorted(how[x]))) for x in best]
-ASK_LOG = deque()   # timestamps of model calls, for the hourly limit
+ASK_LOG, ASK_LOCK = deque(), threading.Lock()   # times of model calls in this process, for the hourly limit
+
+
+def ask_limit():
+    try:
+        return max(0, int(os.environ.get("ASK_LIMIT_PER_HOUR", "60")))
+    except ValueError:
+        return 60
+
+
+def reserve_ask():
+    """Take one slot of the hourly limit, atomically. Returns the slot, or None when the limit is reached."""
+    now = time.time()
+    with ASK_LOCK:
+        while ASK_LOG and now - ASK_LOG[0] > 3600: ASK_LOG.popleft()
+        if len(ASK_LOG) >= ask_limit(): return None
+        ASK_LOG.append(now)
+        return now
+
+
+def release_ask(slot):
+    """A call that failed does not count against the limit."""
+    with ASK_LOCK:
+        try: ASK_LOG.remove(slot)
+        except ValueError: pass
 
 
 def _ref(loc, num):
@@ -748,14 +811,46 @@ def _numbers(t):
     return re.findall(r"\d+(?:[/.,]\d+)*", t)
 
 
+def _same_number(n):
+    """1.000.000, 1,000,000 and 1000000 are one number; 1,5 and 1.5 are one number."""
+    if re.fullmatch(r"\d{1,3}(?:([.,])\d{3})(?:\1\d{3})*", n):
+        return re.sub(r"[.,]", "", n)
+    return n.replace(",", ".")
+
+
+def _small_int(x):
+    if isinstance(x, bool): return None
+    if isinstance(x, int): return x
+    if isinstance(x, str) and x.strip().isascii() and x.strip().isdigit(): return int(x.strip())
+    return None
+
+
+def parse_answer(out):
+    """The model's JSON, coerced to {answer: str, used: [int], not_found: str} whatever it returned."""
+    out = out if isinstance(out, dict) else {}
+    text = lambda x: "" if x is None else x if isinstance(x, str) else str(x)
+    used = out.get("used") if isinstance(out.get("used"), list) else []
+    return {"answer": text(out.get("answer")), "used": [n for n in map(_small_int, used) if n is not None],
+            "not_found": text(out.get("not_found")), "_usage": out.get("_usage", ("", 0, 0))}
+
+
+def check_answer(answer, used, hits):
+    """Citations outside the hits, numbers not in a cited clause, and an answer that cites nothing at all."""
+    cited = {int(x) for x in re.findall(r"\[([0-9]+)\]", answer)} | set(used)
+    bad_cite = sorted(c for c in cited if c < 1 or c > len(hits))
+    src = {_same_number(n) for c in cited if 1 <= c <= len(hits)
+           for n in _numbers(hits[c - 1][1][3] + " " + _ref(hits[c - 1][1][2], hits[c - 1][1][1]))}   # text + its own reference
+    plain = re.sub(r"\[[0-9]+\]", " ", answer)          # citation marks are not numbers to check
+    bad_num = sorted({n for n in _numbers(plain) if _same_number(n) not in src})
+    return {"bad_cite": bad_cite, "bad_num": bad_num, "no_cite": not cited}
+
+
 def ask_claude(question, hits):
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key: return None, "Chưa đặt ANTHROPIC_API_KEY trên Render — chỉ hiện các khoản tìm được, chưa có câu trả lời."
-    limit = int(os.environ.get("ASK_LIMIT_PER_HOUR", "60"))
-    now = time.time()
-    while ASK_LOG and now - ASK_LOG[0] > 3600: ASK_LOG.popleft()
-    if len(ASK_LOG) >= limit: return None, f"Đã đủ {limit} câu hỏi trong một giờ (giới hạn ASK_LIMIT_PER_HOUR). Thử lại sau."
-    ASK_LOG.append(now)
+    slot = reserve_ask()
+    if slot is None:
+        return None, f"Đã đủ {ask_limit()} câu hỏi trong một giờ (giới hạn ASK_LIMIT_PER_HOUR). Thử lại sau."
     sources = "\n\n".join(f"[{i + 1}] {_ref(h[1][2], h[1][1])}\n{h[1][3][:2500]}" for i, h in enumerate(hits))
     user = (f"Câu hỏi của chuyên gia an toàn, vệ sinh lao động:\n{question}\n\nCác khoản luật tìm được (đánh số):\n{sources}\n\n"
             "Trả lời bằng tiếng Việt, ngắn gọn, CHỈ dựa vào các khoản trên. Sau mỗi ý ghi số khoản làm căn cứ, ví dụ [2] hoặc [1][4]. "
@@ -770,41 +865,63 @@ def ask_claude(question, hits):
     req = urllib.request.Request(base + "/v1/messages", json.dumps(body).encode(),
                                  {"Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01"})
     try:
-        data = json.load(urllib.request.urlopen(req, timeout=90))
+        data = json.load(urllib.request.urlopen(req, timeout=60))
     except urllib.error.HTTPError as e:
+        release_ask(slot)
         return None, f"Claude API báo lỗi {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"
     except Exception as e:
+        release_ask(slot)
         return None, f"Không gọi được Claude API: {e}"
-    text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+    text = "".join(b.get("text", "") for b in data.get("content", []) if isinstance(b, dict) and b.get("type") == "text")
     m = re.search(r"\{.*\}", text, re.S)
     try:
         out = json.loads(m.group(0) if m else text)
     except json.JSONDecodeError:
         return None, "Câu trả lời của model không đúng định dạng — thử lại."
+    if not isinstance(out, dict):
+        return None, "Câu trả lời của model không đúng định dạng — thử lại."
     u = data.get("usage", {}); out["_usage"] = (model, u.get("input_tokens", 0), u.get("output_tokens", 0))
     return out, None
 
 
+def ask_form(q="", doc="", docs=()):
+    opts = "".join(f"<option value='{E(d)}' {'selected' if d == doc else ''}>{E(d)}</option>" for d in docs)
+    return f"""<h1>Hỏi đáp</h1><p class='muted'>Tìm các khoản liên quan trong toàn bộ văn bản đã nạp (BM25, không phân biệt dấu), rồi Claude trả lời
+<b>chỉ dựa trên các khoản đó</b>, kèm số khoản làm căn cứ. Dành cho chuyên gia kiểm tra chất lượng tra cứu — không phải tư vấn pháp lý.</p>
+<form class='row panel' method='post' action='/ask'><input type='hidden' name='token' value='{csrf_token("ask")}'>
+<input name='q' value='{E(q)}' maxlength='500' style='flex:1;min-width:260px' placeholder='ví dụ: công ty xây dựng 120 người có phải thành lập hội đồng ATVSLĐ không?'>
+<select name='doc'><option value=''>Mọi văn bản</option>{opts}</select><button>Hỏi</button></form>"""
+
+
+def doc_numbers():
+    with db() as conn:
+        return [r[0] for r in conn.execute("SELECT DISTINCT d.number FROM legal_documents d JOIN chunks c ON c.document_id=d.id ORDER BY 1").fetchall()]
+
+
 @app.get("/ask")
-def ask(q: str = Query("", max_length=500), doc: str = Query("", max_length=40)):
+def ask_page(q: str = Query("", max_length=500), doc: str = Query("", max_length=40)):
+    """Only the form: asking costs a model call, so it is a POST with a token, never a link."""
+    return page("Hỏi đáp", ask_form(q, doc, doc_numbers()), "/ask")
+
+
+@app.post("/ask")
+def ask(request: Request, q: str = Form("", max_length=500), doc: str = Form("", max_length=40), token: str = Form("")):
+    if not same_origin(request) or not hmac.compare_digest(token, csrf_token("ask")):
+        raise HTTPException(403, "Mã xác nhận không đúng — tải lại trang rồi thử lại")
     with db() as conn:
         INDEX.ensure(conn)
         docs = [r[0] for r in conn.execute("SELECT DISTINCT d.number FROM legal_documents d JOIN chunks c ON c.document_id=d.id ORDER BY 1").fetchall()]
-    hits, mode = [], ""
-    if q.strip():
-        with db() as conn:
-            bm = INDEX.search(q, k=40)
-            vr, mode = vector_search(conn, q)
-        if doc:
-            bm = [h for h in bm if h[1][1] == doc]; vr = [r for r in vr if r[1] == doc]
-        hits = fuse(bm, vr) if vr else [(sc, r, "từ khóa") for sc, r in bm[:12]]
-    opts = "".join(f"<option value='{E(d)}' {'selected' if d == doc else ''}>{E(d)}</option>" for d in docs)
-    body = [f"""<h1>Hỏi đáp</h1><p class='muted'>Tìm các khoản liên quan trong toàn bộ văn bản đã nạp (BM25, không phân biệt dấu), rồi Claude trả lời
-<b>chỉ dựa trên các khoản đó</b>, kèm số khoản làm căn cứ. Dành cho chuyên gia kiểm tra chất lượng tra cứu — không phải tư vấn pháp lý.</p>
-<form class='row panel' method='get'><input name='q' value='{E(q)}' style='flex:1;min-width:260px' placeholder='ví dụ: công ty xây dựng 120 người có phải thành lập hội đồng ATVSLĐ không?'>
-<select name='doc'><option value=''>Mọi văn bản</option>{opts}</select><button>Hỏi</button></form>"""]
+        model, mode = vector_model(conn)
+    body = [ask_form(q, doc, docs)]
     if not q.strip():
         return page("Hỏi đáp", "".join(body), "/ask")
+    bm, vr = INDEX.search(q, k=40, doc=doc), []
+    if model:
+        vec, mode = embed_query(q, model)   # no database connection is held during the HTTP call
+        if vec is not None:
+            with db() as conn:
+                vr, mode = vector_rows(conn, vec, model, doc)
+    hits = fuse(bm, vr) if vr else [(sc, r, "từ khóa") for sc, r in bm[:12]]
     if not hits:
         body.append("<div class='panel'>Không tìm thấy khoản nào chứa các từ trong câu hỏi.</div>")
         return page("Hỏi đáp", "".join(body), "/ask")
@@ -812,23 +929,18 @@ def ask(q: str = Query("", max_length=500), doc: str = Query("", max_length=40))
     if err:
         body.append(f"<p class='err'>{E(err)}</p>")
     if out:
-        used = [int(x) for x in out.get("used", []) if str(x).isdigit()]
-        cited = {int(x) for x in re.findall(r"\[(\d+)\]", out.get("answer", ""))} | set(used)
-        bad_cite = sorted(c for c in cited if c < 1 or c > len(hits))
-        src_nums = {n for c in cited if 1 <= c <= len(hits)
-                    for n in _numbers(hits[c - 1][1][3] + " " + _ref(hits[c - 1][1][2], hits[c - 1][1][1]))}   # text + its own reference
-        plain = re.sub(r"\[\d+\]", " ", out.get("answer", ""))          # citation marks are not numbers to check
-        bad_num = sorted({n for n in _numbers(plain) if n not in src_nums})
-        ans = E(out.get("answer", ""))
-        ans = re.sub(r"\[(\d+)\]", lambda m: f"<a href='#s{m.group(1)}'>[{m.group(1)}]</a>", ans)
-        model, ti, to = out.get("_usage", ("", 0, 0))
+        a = parse_answer(out)
+        chk = check_answer(a["answer"], a["used"], hits)
+        ans = re.sub(r"\[([0-9]+)\]", lambda m: f"<a href='#s{m.group(1)}'>[{m.group(1)}]</a>", E(a["answer"]))
+        usage = a["_usage"] if isinstance(a["_usage"], (list, tuple)) and len(a["_usage"]) == 3 else ("", 0, 0)
         warn = ""
-        if bad_cite: warn += f"<p class='err'>Câu trả lời dẫn khoản không có trong kết quả tìm: {E(', '.join(map(str, bad_cite)))}</p>"
-        if bad_num: warn += f"<p class='err'>Con số không có trong các khoản được dẫn: {E(', '.join(bad_num))} — kiểm tra lại với nguyên văn.</p>"
+        if chk["bad_cite"]: warn += f"<p class='err'>Câu trả lời dẫn khoản không có trong kết quả tìm: {E(', '.join(map(str, chk['bad_cite'])))}</p>"
+        if chk["bad_num"]: warn += f"<p class='err'>Con số không có trong các khoản được dẫn: {E(', '.join(chk['bad_num']))} — kiểm tra lại với nguyên văn.</p>"
+        if chk["no_cite"]: warn += "<p class='err'>Câu trả lời không dẫn khoản nào — không dùng được nếu chưa đối chiếu nguyên văn.</p>"
         body.append(f"""<div class='panel' style='border-color:var(--accent)'><h3 style='margin-top:0'>Trả lời</h3>
 <p class='law' style='font-family:inherit;font-size:1rem'>{ans}</p>{warn}
-{f"<p class='muted'><b>Không tìm thấy căn cứ:</b> {E(out['not_found'])}</p>" if out.get('not_found') else ''}
-<p class='muted' style='font-size:.78rem;margin-bottom:0'>{E(model)} · {ti:,} token vào, {to:,} token ra. Câu trả lời do model viết từ các khoản bên dưới;
+{f"<p class='muted'><b>Không tìm thấy căn cứ:</b> {E(a['not_found'])}</p>" if a['not_found'] else ''}
+<p class='muted' style='font-size:.78rem;margin-bottom:0'>{E(str(usage[0]))} · {E(str(usage[1]))} token vào, {E(str(usage[2]))} token ra. Câu trả lời do model viết từ các khoản bên dưới;
 chuyên gia cần đối chiếu nguyên văn. Văn bản sửa đổi chỉ được tính nếu khoản sửa đổi nằm trong kết quả tìm.</p></div>""")
     rows = []
     for i, (score, (did, num, loc, text), how) in enumerate(hits, 1):
@@ -836,5 +948,5 @@ chuyên gia cần đối chiếu nguyên văn. Văn bản sửa đổi chỉ đ�
                     f"<span class='muted'>{E(loc.get('dieu_title') or '')}</span> <span class='pill{' ok' if '+' in how else ''}'>{E(how)}</span>"
                     f"<p class='law' style='font-size:.9rem'>{E(text.split(chr(10), 1)[-1][:1800])}</p></div>")
     body.append(f"<div class='panel'><h3 style='margin-top:0'>Các khoản tìm được ({len(hits)})</h3>"
-                f"<p class='muted' style='font-size:.82rem'>Cách tìm: {E(mode)}</p>{''.join(rows)}</div>")
+                f"<p class='muted' style='font-size:.82rem'>Cách tìm: {E(mode or '')}</p>{''.join(rows)}</div>")
     return page("Hỏi đáp", "".join(body), "/ask")
