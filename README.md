@@ -9,6 +9,8 @@ Trang xem dữ liệu trong Neon, chỉ đọc. FastAPI một file, chạy trên
 
 Chạy thử trên máy: `pip install -r requirements.txt`, đặt hai biến trên, rồi `uvicorn app:app --reload`.
 
+Mô tả từng hàm, route và hằng số trong `app.py` (đầu vào, đầu ra, tác dụng phụ): [docs/app-reference.md](docs/app-reference.md).
+
 ## Known issues
 
 Lượt review toàn bộ `app.py` ngày 2026-11-10 ghi ở [docs/review-2026-11.md](docs/review-2026-11.md). Các lỗi về tính đúng và bảo mật đã sửa ngày 2026-11-11 (nhánh `fix/review-2026-11`), trừ những phần còn mở dưới đây. Mức độ:
