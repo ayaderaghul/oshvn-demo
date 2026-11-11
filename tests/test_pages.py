@@ -12,8 +12,11 @@ BAD = "<img src=x onerror=alert(1)>"
 def setUpModule():
     global db, DOC_A, DOC_B
     db = support.setup_db(__name__)
-    DOC_A = add_document(db, "1/2026/NĐ-CP", [(d, 1, f"Người sử dụng lao động phải tổ chức huấn luyện an toàn lần {d}.") for d in range(1, 46)])
-    DOC_B = add_document(db, "2/2026/NĐ-CP", [(1, 1, "Huấn luyện an toàn cho người lao động mới tuyển dụng.")])
+    DOC_A = add_document(db, "1/2026/NĐ-CP", [(d, 1, f"Huấn luyện an toàn: huấn luyện an toàn định kỳ, huấn luyện an toàn lần {d}.")
+                                              for d in range(1, 61)])
+    # one weak hit in a long clause: it ranks below every clause of DOC_A, so only a filter before ranking finds it
+    DOC_B = add_document(db, "2/2026/NĐ-CP", [(1, 1, "Huấn luyện an toàn cho người lao động mới tuyển dụng. "
+                                              + "Doanh nghiệp lập hồ sơ, lưu giữ biên bản và báo cáo cơ quan quản lý theo mẫu. " * 12)])
 
 
 def tearDownModule():

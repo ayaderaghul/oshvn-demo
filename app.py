@@ -24,25 +24,40 @@ FAILED_LOGINS, _login_lock = {}, threading.Lock()
 
 
 def reviewer_name(raw):
-    """The Basic-auth user name, recorded as the reviewer: without invisible characters (U+200B…) or controls."""
+    """The Basic-auth user name, recorded as the reviewer. Invisible and blank-looking characters (U+200B, Hangul
+    fillers, braille blank…) are dropped; a name with no letter or digit left is no name."""
+    def visible(ch):
+        name = unicodedata.name(ch, "")
+        return (ch.isprintable() and unicodedata.category(ch) not in ("Cf", "Cc", "Zs")
+                and "FILLER" not in name and name != "BRAILLE PATTERN BLANK")
     s = unicodedata.normalize("NFKC", raw or "")
-    return "".join(ch for ch in s if unicodedata.category(ch) not in ("Cf", "Cc")).strip()
+    s = " ".join("".join(ch if ch == " " or visible(ch) else "" for ch in s).split())
+    return s if any(ch.isalnum() for ch in s) else ""
+
+
+def client_key(request):
+    """Who is guessing passwords. Behind Render's proxy the last X-Forwarded-For entry is the one the proxy added,
+    so a client cannot choose it; entries to its left are whatever the client sent."""
+    xff = request.headers.get("x-forwarded-for", "")
+    return xff.split(",")[-1].strip() if xff.strip() else (request.client.host if request.client else "?")
 
 
 def auth(request: Request, c: HTTPBasicCredentials | None = Depends(security)):
     if request.url.path in PUBLIC_PATHS:
         return ""
-    ip, now = (request.client.host if request.client else "?"), time.time()
+    key, now = client_key(request), time.time()
     with _login_lock:
-        fails = FAILED_LOGINS.setdefault(ip, deque())
+        fails = FAILED_LOGINS.get(key)
         while fails and now - fails[0] > LOGIN_WINDOW: fails.popleft()
-        if len(fails) >= LOGIN_FAILURES_ALLOWED:
+        if fails is not None and not fails: del FAILED_LOGINS[key]
+        if fails and len(fails) >= LOGIN_FAILURES_ALLOWED:
             raise HTTPException(429, "Sai mật khẩu quá nhiều lần — thử lại sau 15 phút")
     pw = os.environ.get("APP_PASSWORD")
     if not pw or c is None or not secrets.compare_digest(c.password.encode(), pw.encode()):
         if c is not None:
-            with _login_lock: FAILED_LOGINS[ip].append(now)
+            with _login_lock: FAILED_LOGINS.setdefault(key, deque()).append(now)
         raise HTTPException(401, "Sai mật khẩu", headers={"WWW-Authenticate": "Basic"})
+    with _login_lock: FAILED_LOGINS.pop(key, None)
     return reviewer_name(c.username)
 
 
@@ -375,7 +390,7 @@ VERDICT_VI = {"ok": ("có thể duyệt", "ok"), "check": ("cần xem kỹ", "no
 def agent_cell(verdict, comment, route, full=False):
     if not verdict:
         return "<td class='muted' style='font-size:.82rem'>— (tạo bằng loader.py propose)</td>"
-    lab, cls = VERDICT_VI.get(verdict, (verdict, ""))
+    lab, cls = VERDICT_VI.get(verdict, ("?", ""))
     how = {"ocr": "bản scan · OCR + Claude đọc ảnh", "parse": "file có chữ"}.get(route or "", route or "")
     text = comment or ""
     short = E(text) if full else E(text[:260]) + ("…" if len(text) > 260 else "")
@@ -820,8 +835,8 @@ def _same_number(n):
 
 def _small_int(x):
     if isinstance(x, bool): return None
-    if isinstance(x, int): return x
-    if isinstance(x, str) and x.strip().isascii() and x.strip().isdigit(): return int(x.strip())
+    if isinstance(x, int): return x if abs(x) < 10**6 else None
+    if isinstance(x, str) and x.strip().isascii() and x.strip().isdigit() and len(x.strip()) <= 6: return int(x.strip())
     return None
 
 
@@ -836,12 +851,13 @@ def parse_answer(out):
 
 def check_answer(answer, used, hits):
     """Citations outside the hits, numbers not in a cited clause, and an answer that cites nothing at all."""
-    cited = {int(x) for x in re.findall(r"\[([0-9]+)\]", answer)} | set(used)
+    cited = {int(x) for x in re.findall(r"\[([0-9]{1,6})\]", answer)} | set(used)
     bad_cite = sorted(c for c in cited if c < 1 or c > len(hits))
     src = {_same_number(n) for c in cited if 1 <= c <= len(hits)
            for n in _numbers(hits[c - 1][1][3] + " " + _ref(hits[c - 1][1][2], hits[c - 1][1][1]))}   # text + its own reference
     plain = re.sub(r"\[[0-9]+\]", " ", answer)          # citation marks are not numbers to check
-    bad_num = sorted({n for n in _numbers(plain) if _same_number(n) not in src})
+    bad_num = sorted({n for n in _numbers(plain) if _same_number(n) not in src
+                      and not all(_same_number(p) in src for p in re.split(r"[,;]", n))})   # "5,7" may be a list
     return {"bad_cite": bad_cite, "bad_num": bad_num, "no_cite": not cited}
 
 
@@ -931,7 +947,7 @@ def ask(request: Request, q: str = Form("", max_length=500), doc: str = Form("",
     if out:
         a = parse_answer(out)
         chk = check_answer(a["answer"], a["used"], hits)
-        ans = re.sub(r"\[([0-9]+)\]", lambda m: f"<a href='#s{m.group(1)}'>[{m.group(1)}]</a>", E(a["answer"]))
+        ans = re.sub(r"\[([0-9]{1,6})\]", lambda m: f"<a href='#s{m.group(1)}'>[{m.group(1)}]</a>", E(a["answer"]))
         usage = a["_usage"] if isinstance(a["_usage"], (list, tuple)) and len(a["_usage"]) == 3 else ("", 0, 0)
         warn = ""
         if chk["bad_cite"]: warn += f"<p class='err'>Câu trả lời dẫn khoản không có trong kết quả tìm: {E(', '.join(map(str, chk['bad_cite'])))}</p>"

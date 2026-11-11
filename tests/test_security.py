@@ -42,13 +42,59 @@ class Login(unittest.TestCase):
 
     def test_reviewer_name_loses_invisible_characters(self):
         self.assertEqual(webapp.reviewer_name("​chi‍ "), "chi")
-        self.assertEqual(webapp.reviewer_name("​‍"), "")
+        self.assertEqual(webapp.reviewer_name("Nguyễn  Chi"), "Nguyễn Chi")
+        for blank in ("​‍", "ㅤ⠀", "ᅟﾠ", " 　 "):
+            with self.subTest(name=repr(blank)):
+                self.assertEqual(webapp.reviewer_name(blank), "")
+
+    def test_spoofed_forwarded_for_entries_do_not_escape_the_throttle(self):
+        c = client()
+        codes = [c.get("/", headers=basic(password="wrong") | {"x-forwarded-for": f"10.0.0.{i}, 203.0.113.9"}).status_code
+                 for i in range(webapp.LOGIN_FAILURES_ALLOWED + 1)]
+        self.assertEqual(codes[-1], 429)
+
+    def test_another_client_is_not_locked_out_by_spoofing_its_address(self):
+        c = client()
+        for _ in range(webapp.LOGIN_FAILURES_ALLOWED + 1):
+            c.get("/healthz")
+            c.get("/obligations", headers=basic(password="wrong") | {"x-forwarded-for": "198.51.100.7, 203.0.113.9"})
+        r = c.get("/healthz", headers={"x-forwarded-for": "198.51.100.7"})
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("198.51.100.7", webapp.FAILED_LOGINS)
+
+    def test_requests_without_credentials_leave_no_trace(self):
+        c = client()
+        for i in range(20):
+            c.get("/", headers={"x-forwarded-for": f"192.0.2.{i}"})
+        self.assertEqual(webapp.FAILED_LOGINS, {})
+
+    def test_a_correct_login_clears_the_failures(self):
+        c = client()
+        for _ in range(webapp.LOGIN_FAILURES_ALLOWED - 1):
+            c.get("/healthz-x", headers=basic(password="wrong"))
+        c.get("/healthz-x", headers=basic())
+        self.assertEqual(webapp.FAILED_LOGINS, {})
 
 
 class ReviewOrigin(unittest.TestCase):
+    def setUp(self):
+        webapp.FAILED_LOGINS.clear()
+
     def test_review_post_without_origin_or_referer_is_refused(self):
         r = client().post("/proposals/1/review", headers=basic(), data={"token": webapp.csrf_token(1), "decision": "approved"})
         self.assertEqual(r.status_code, 403)
+
+    def test_referer_of_another_site_is_refused_and_of_this_site_is_accepted(self):
+        class R:
+            def __init__(self, h): self.headers = h
+        self.assertFalse(webapp.same_origin(R({"host": "app.example", "referer": "https://evil.example/x"})))
+        self.assertTrue(webapp.same_origin(R({"host": "app.example", "referer": "https://app.example/proposals/1"})))
+        self.assertFalse(webapp.same_origin(R({"host": "app.example", "origin": "null"})))
+
+
+class AgentCell(unittest.TestCase):
+    def test_an_unknown_verdict_is_not_written_into_the_page(self):
+        self.assertNotIn("<img", webapp.agent_cell("<img src=x onerror=1>", "c", "parse"))
 
 
 class Nice(unittest.TestCase):
@@ -80,6 +126,14 @@ class AnswerChecks(unittest.TestCase):
 
     def test_a_citation_outside_the_hits_is_reported(self):
         self.assertEqual(webapp.check_answer("Xem [3].", [], HITS)["bad_cite"], [3])
+
+    def test_a_huge_citation_number_is_not_a_crash(self):
+        self.assertTrue(webapp.check_answer("Xem [" + "9" * 5000 + "].", [], HITS)["no_cite"])
+        self.assertEqual(webapp.parse_answer({"answer": "a", "used": ["9" * 5000, 10 ** 5000]})["used"], [])
+
+    def test_a_list_of_clause_numbers_is_not_a_false_alarm(self):
+        hits = [(1.0, (1, "1/2026/NĐ-CP", {"dieu": 2}, "Theo khoản 5 và khoản 7 Điều 2."), "từ khóa")]
+        self.assertEqual(webapp.check_answer("Xem khoản 5,7 [1].", [1], hits)["bad_num"], [])
 
 
 class FakeConn:
