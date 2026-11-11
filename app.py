@@ -4,35 +4,80 @@ Pages: documents · one document (Điều › Khoản) · keyword search · obli
 Environment: DATABASE_URL (role oshvn_web: reads tables; its only write is the review_proposal() function),
 APP_PASSWORD (HTTP Basic; the user name is recorded as the reviewer).
 """
-import difflib, hashlib, hmac, html, json, math, os, re, secrets, threading, time, unicodedata, urllib.request
-from collections import Counter, deque
-from urllib.parse import quote
+import difflib, hashlib, hmac, html, json, math, os, re, secrets, threading, time, unicodedata, urllib.error, urllib.request
+from collections import Counter, deque, namedtuple
+from urllib.parse import urlsplit
 from contextlib import contextmanager
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-security = HTTPBasic()
+security = HTTPBasic(auto_error=False)
 E = html.escape
+PUBLIC_PATHS = {"/healthz"}
+LOGIN_FAILURES_ALLOWED = 10          # per client address, within LOGIN_WINDOW seconds
+LOGIN_WINDOW = 900
+FAILED_LOGINS, _login_lock = {}, threading.Lock()
 
 
-def auth(c: HTTPBasicCredentials = Depends(security)):
+def reviewer_name(raw):
+    """The Basic-auth user name, recorded as the reviewer: without invisible characters (U+200B…) or controls."""
+    s = unicodedata.normalize("NFKC", raw or "")
+    return "".join(ch for ch in s if unicodedata.category(ch) not in ("Cf", "Cc")).strip()
+
+
+def auth(request: Request, c: HTTPBasicCredentials | None = Depends(security)):
+    if request.url.path in PUBLIC_PATHS:
+        return ""
+    ip, now = (request.client.host if request.client else "?"), time.time()
+    with _login_lock:
+        fails = FAILED_LOGINS.setdefault(ip, deque())
+        while fails and now - fails[0] > LOGIN_WINDOW: fails.popleft()
+        if len(fails) >= LOGIN_FAILURES_ALLOWED:
+            raise HTTPException(429, "Sai mật khẩu quá nhiều lần — thử lại sau 15 phút")
     pw = os.environ.get("APP_PASSWORD")
-    if not pw or not secrets.compare_digest(c.password.encode(), pw.encode()):
+    if not pw or c is None or not secrets.compare_digest(c.password.encode(), pw.encode()):
+        if c is not None:
+            with _login_lock: FAILED_LOGINS[ip].append(now)
         raise HTTPException(401, "Sai mật khẩu", headers={"WWW-Authenticate": "Basic"})
-    return c.username.strip()
+    return reviewer_name(c.username)
+
+
+# every route needs the password (except PUBLIC_PATHS): a new route cannot be public by forgetting a dependency
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, dependencies=[Depends(auth)])
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
+
+
+def database_url():
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        raise HTTPException(500, "Chưa đặt DATABASE_URL trên Render")
+    return url
 
 
 @contextmanager
 def db():
-    url = os.environ.get("DATABASE_URL")
-    if not url:
-        raise HTTPException(500, "Chưa đặt DATABASE_URL trên Render")
-    with psycopg.connect(url, autocommit=True, connect_timeout=15) as conn:
-        conn.execute("SET default_transaction_read_only = on")
+    """Read-only: every transaction starts with BEGIN READ ONLY, which also holds through Neon's connection pooler."""
+    with psycopg.connect(database_url(), connect_timeout=15) as conn:
+        conn.read_only = True
+        yield conn
+
+
+@contextmanager
+def writer():
+    """The only writes this app makes: review_proposal() and review_proposal_items()."""
+    with psycopg.connect(database_url(), autocommit=True, connect_timeout=15) as conn:
         yield conn
 
 
@@ -80,7 +125,7 @@ def healthz():
     return "ok"
 
 
-@app.get("/", dependencies=[Depends(auth)])
+@app.get("/")
 def documents():
     with db() as conn:
         rows = conn.execute("""
@@ -90,13 +135,13 @@ def documents():
                  count(DISTINCT c.locator->>'dieu') FILTER (WHERE c.source_kind='legal_article' AND NOT coalesce(c.retired,false)
                                                            AND c.locator->>'dieu' ~ '^[0-9]+$') AS dieu,
                  count(*) FILTER (WHERE c.source_kind='legal_article' AND NOT coalesce(c.retired,false)
-                                  AND c.locator->>'kind' LIKE 'appendix%%') AS pl
+                                  AND c.locator->>'kind' LIKE 'appendix%') AS pl
           FROM legal_documents d LEFT JOIN chunks c ON c.document_id=d.id
           GROUP BY d.id ORDER BY (count(c.*)=0), d.number""").fetchall()
         tot, tot_dieu, tot_pl = conn.execute("""
           SELECT count(*),
                  count(DISTINCT (document_id, locator->>'dieu')) FILTER (WHERE locator->>'dieu' ~ '^[0-9]+$'),
-                 count(*) FILTER (WHERE locator->>'kind' LIKE 'appendix%%')
+                 count(*) FILTER (WHERE locator->>'kind' LIKE 'appendix%')
           FROM chunks WHERE source_kind='legal_article' AND NOT coalesce(retired,false)""").fetchone()
     body = [f"<h1>Văn bản trong database</h1><div class='kpis' style='margin:10px 0 14px'><div class='kpi'><b>{len(rows)}</b>văn bản</div><div class='kpi'><b>{tot_dieu:,}</b>điều</div>"
             f"<div class='kpi'><b>{tot - tot_pl:,}</b>khoản và đoạn</div><div class='kpi'><b>{tot_pl:,}</b>mục phụ lục</div></div>"
@@ -111,7 +156,7 @@ def documents():
     return page("Văn bản", "".join(body), "/")
 
 
-@app.get("/doc/{doc_id}", dependencies=[Depends(auth)])
+@app.get("/doc/{doc_id}")
 def document(doc_id: int):
     with db() as conn:
         d = conn.execute("SELECT number, title_vi, type, check_report FROM legal_documents WHERE id=%s", (doc_id,)).fetchone()
@@ -139,21 +184,21 @@ def document(doc_id: int):
             lastch = group
             head = "Phụ lục" if group == "Phụ lục" else (f"Chương {group} · {loc.get('chuong_title') or ''}" if group else "")
             if head: toc.append(f"<h4>{E(head)}</h4>")
-        toc.append(f"<a href='#d{k}'>{E(loc.get('label') or 'Đ.' + str(k))} {E(loc.get('dieu_title') or '')}</a>")
+        toc.append(f"<a href='#d{E(str(k))}'>{E(loc.get('label') or 'Đ.' + str(k))} {E(loc.get('dieu_title') or '')}</a>")
     main = []
     for k in order:
         loc = arts[k]["loc"]
-        main.append(f"<div class='art' id='d{k}'><h3>{E(loc.get('label') or 'Điều ' + str(k))}. {E(loc.get('dieu_title') or '')}</h3>")
+        main.append(f"<div class='art' id='d{E(str(k))}'><h3>{E(loc.get('label') or 'Điều ' + str(k))}. {E(loc.get('dieu_title') or '')}</h3>")
         for pl, t in arts[k]["parts"]:
             tag = f"{'Mục' if pl.get('kind') == 'appendix_item' else 'Khoản'} {pl['khoan']}" if pl.get("khoan") else ("Mở đầu" if pl.get("kind") == "lead" else "Đoạn")
-            main.append(f"<div class='k'><b>{tag}</b><p class='law'>{E(t)}</p></div>")
+            main.append(f"<div class='k'><b>{E(tag)}</b><p class='law'>{E(t)}</p></div>")
         main.append("</div>")
     checks = "".join(f"<span class='pill {'ok' if c['ok'] else 'no'}' title='{E(c['detail'])}'>{'ĐẠT' if c['ok'] else 'LỖI'} · {E(c['name'])}</span> "
                      for c in (d[3] or []))
     hrows = "".join(
-        f"<tr><td><a href='/proposals/{h[0]}'>#{h[0]}</a></td><td><span class='pill {STATUS_VI.get(h[1], ('', ''))[1]}'>{STATUS_VI.get(h[1], (h[1], ''))[0]}</span></td>"
+        f"<tr><td><a href='/proposals/{h[0]}'>#{h[0]}</a></td><td>{status_pill(h[1])}</td>"
         f"<td style='font-size:.82rem'>{E(h[2] or '')}<br><span class='muted'>{h[3]}</span></td>"
-        f"<td style='font-size:.82rem'>{(h[10] or {}).get('new', 0)} mới / {(h[10] or {}).get('changed', 0)} đổi / {(h[10] or {}).get('retired', 0)} ngừng</td>"
+        f"<td style='font-size:.82rem'>{counts(h[10])}</td>"
         + agent_cell(h[7], h[8], h[9], full=True)
         + f"<td style='font-size:.82rem'>{E(h[4] or '—')}<br><span class='muted'>{h[5] or ''}</span>"
         + (f"<br><i>{E(h[6])}</i>" if h[6] else "") + "</td></tr>" for h in hist)
@@ -165,7 +210,7 @@ def document(doc_id: int):
     return page(d[0], body, "/")
 
 
-@app.get("/search", dependencies=[Depends(auth)])
+@app.get("/search")
 def search(q: str = Query("", max_length=300)):
     hits = []
     if q.strip():
@@ -189,7 +234,7 @@ def search(q: str = Query("", max_length=300)):
     for did, num, loc, rank, snip in hits:
         snip = E(snip).replace("&lt;mark&gt;", "<mark>").replace("&lt;/mark&gt;", "</mark>")
         ref = loc.get("ref") or ((loc.get("label") or f"Điều {loc.get('dieu')}") + (f", khoản {loc['khoan']}" if loc.get("khoan") else ""))
-        res.append(f"<div class='art'><a href='/doc/{did}#d{loc.get('dieu')}'><b>{E(num)} · {E(ref)}</b></a> <span class='muted'>{E(loc.get('dieu_title') or '')}</span>"
+        res.append(f"<div class='art'><a href='/doc/{did}#d{E(str(loc.get('dieu')))}'><b>{E(num)} · {E(ref)}</b></a> <span class='muted'>{E(loc.get('dieu_title') or '')}</span>"
                    f"<p class='law' style='font-size:.92rem'>{snip}</p></div>")
     body = (f"<h1>Tìm kiếm từ khóa</h1><p class='muted'>Tìm trên toàn bộ khoản luật, không phân biệt dấu. Tìm theo nghĩa (vector) sẽ có khi tạo embedding.</p>"
             f"<form class='row panel' method='get'><input name='q' value='{E(q)}' style='flex:1;min-width:220px' placeholder='ví dụ: khám sức khỏe định kỳ'><button>Tìm</button></form>"
@@ -211,24 +256,38 @@ LABEL = {f: l for f, l, _ in FIELDS} | {"g36": "Ngành thuộc Điều 36 khoả
 def nice(reason):
     for k, v in sorted(LABEL.items(), key=lambda x: -len(x[0])):
         reason = re.sub(rf"^{k}\b", v, reason)
-    return (reason.replace('"contractor"', "nhà thầu").replace('"owner"', "chủ đầu tư").replace('"none"', "không tham gia XD")
-            .replace("applies to every employer", "áp dụng cho mọi người sử dụng lao động").replace("needs", "cần").replace("true", "có").replace("false", "không"))
+    reason = (reason.replace('"contractor"', "nhà thầu").replace('"owner"', "chủ đầu tư").replace('"none"', "không tham gia XD")
+              .replace("applies to every employer", "áp dụng cho mọi người sử dụng lao động"))
+    for en, vi in (("needs", "cần"), ("true", "có"), ("false", "không")):
+        reason = re.sub(rf"\b{en}\b", vi, reason)
+    return reason
 
 
-@app.get("/obligations", dependencies=[Depends(auth)])
+def penalty_label(p):
+    if not isinstance(p, dict): return str(p)
+    return (f"Đ{p.get('dieu', '?')}" + (f" k{p['khoan']}" if p.get("khoan") is not None else "") + f": {p.get('text', '')}")
+
+
+@app.get("/obligations")
 def obligations(request: Request):
     qp = request.query_params
     sector = qp.get("sector", "xd")
+    try:
+        n = min(max(int(qp.get("n") or 350), 1), 10_000_000)
+    except ValueError:
+        n = 350
     prof = {"sector": sector, "g36": bool(SECTORS.get(sector, SECTORS["khac"])[1]), "g37": bool(SECTORS.get(sector, SECTORS["khac"])[2]),
-            "n": int(qp.get("n") or 350), "role": qp.get("role", "contractor")}
+            "n": n, "role": qp.get("role", "contractor")}
     defaults = {"strict": True, "hazardous": True, "kcn": True}
     for f, _, t in FIELDS:
         if t == "bool":
             prof[f] = (qp.get(f) == "1") if "n" in qp else defaults.get(f, False)
     with db() as conn:
         rows = conn.execute("""SELECT id, topic, kind, duty_vi, action_vi, article_ref, penalties, change_note,
-                                      explain_rule(applies_when, %s::jsonb) AS ex, reviewed, needs_review
-                               FROM obligations WHERE sources IS NOT NULL ORDER BY id""", (json.dumps(prof),)).fetchall()
+                                      explain_rule(applies_when, %s::jsonb) AS ex, reviewed, needs_review,
+                                      to_jsonb(o)->>'reviewed_by', review_reason
+                               FROM obligations o WHERE sources IS NOT NULL ORDER BY id""", (json.dumps(prof),)).fetchall()
+        rows = [r[:8] + ((r[8] if isinstance(r[8], dict) else {}),) + r[9:] for r in rows]
         sample = conn.execute("SELECT count(*) FROM obligations WHERE sources IS NULL").fetchone()[0]
     form = ["<form class='panel' method='get'><div class='row' style='margin-bottom:8px'>",
             "<label>Ngành<br><select name='sector'>" + "".join(f"<option value='{k}' {'selected' if k == sector else ''}>{E(v[0])}</option>" for k, v in SECTORS.items()) + "</select></label>",
@@ -239,15 +298,16 @@ def obligations(request: Request):
         if t == "bool":
             form.append(f"<label class='c'><input type='checkbox' name='{f}' value='1' {'checked' if prof[f] else ''}>{E(l)}</label>")
     form.append("<button>Áp dụng</button></div></form>")
-    ap = [r for r in rows if r[8]["applies"]]
+    ap = [r for r in rows if r[8].get("applies")]
     table = ["<div class='panel scroll'><table><tr><th>Mã</th><th>Chủ đề</th><th>Điều khoản</th><th>Nội dung</th><th>Vì sao</th><th>Phạt</th></tr>"]
-    for r in sorted(rows, key=lambda r: (not r[8]["applies"], r[0])):
-        why = r[8]["reasons"] if r[8]["applies"] else r[8]["missing"]
-        pen = "<br>".join(E(f"Đ{p['dieu']} k{p['khoan']}: {p['text']}") for p in (r[6] or [])[:2])
-        tag = "<span class='pill ok'>Áp dụng</span>" if r[8]["applies"] else "<span class='pill'>N/A</span>"
-        if r[10]: tag += " <span class='pill no'>cần xem lại</span>"
+    for r in sorted(rows, key=lambda r: (not r[8].get("applies"), r[0])):
+        why = (r[8].get("reasons") if r[8].get("applies") else r[8].get("missing")) or []
+        pen = "<br>".join(E(penalty_label(p)) for p in (r[6] if isinstance(r[6], list) else [])[:2])
+        tag = "<span class='pill ok'>Áp dụng</span>" if r[8].get("applies") else "<span class='pill'>N/A</span>"
+        if r[9]: tag += f" <span class='pill ok'>đã duyệt bởi {E(r[11] or '?')}</span>"
+        if r[10]: tag += f" <span class='pill no' title='{E(r[12] or '')}'>cần xem lại</span>"
         if r[7]: tag += " <span class='pill no'>đã thay đổi</span>"
-        table.append(f"<tr style='{'' if r[8]['applies'] else 'opacity:.55'}'><td>{E(r[0])}<br>{tag}</td><td>{E(r[1] or '')}</td><td style='font-size:.82rem'>{E(r[5] or '')}</td>"
+        table.append(f"<tr style='{'' if r[8].get('applies') else 'opacity:.55'}'><td>{E(r[0])}<br>{tag}</td><td>{E(r[1] or '')}</td><td style='font-size:.82rem'>{E(r[5] or '')}</td>"
                      f"<td>{E(r[3] or '')}<br><span class='muted' style='font-size:.85rem'>→ {E(r[4] or '')}</span></td>"
                      f"<td style='font-size:.82rem'>{'<br>'.join(E(nice(w)) for w in why)}</td><td style='font-size:.8rem'>{pen}</td></tr>")
     table.append("</table></div>")
@@ -259,7 +319,7 @@ def obligations(request: Request):
     return page("Nghĩa vụ", head + ("".join(table) if rows else ""), "/obligations")
 
 
-@app.get("/runs", dependencies=[Depends(auth)])
+@app.get("/runs")
 def runs():
     with db() as conn:
         rows = conn.execute("SELECT id, kind, status, started_at::timestamp(0), created_by, report FROM load_runs ORDER BY id DESC LIMIT 50").fetchall()
@@ -279,6 +339,16 @@ def runs():
 # ---------------------------------------------------------------- review of load proposals
 STATUS_VI = {"pending": ("Chờ duyệt", "no"), "approved": ("Đã duyệt — chờ nạp", "ok"), "rejected": ("Từ chối", ""),
              "applied": ("Đã nạp", "ok"), "superseded": ("Bị thay thế", ""), "failed": ("Lỗi khi nạp", "no")}
+
+
+def status_pill(status):
+    lab, cls = STATUS_VI.get(status, (str(status), ""))
+    return f"<span class='pill {cls}'>{E(lab)}</span>"
+
+
+def counts(c):
+    c = c if isinstance(c, dict) else {}
+    return E(f"{c.get('new', 0)} mới / {c.get('changed', 0)} đổi / {c.get('retired', 0)} ngừng")
 
 
 def csrf_token(pid):
@@ -309,7 +379,7 @@ def agent_cell(verdict, comment, route, full=False):
     return (f"<td style='font-size:.85rem'><span class='pill {cls}'>{lab}</span> <span class='muted'>{E(how)}</span><br>{short}</td>")
 
 
-@app.get("/proposals", dependencies=[Depends(auth)])
+@app.get("/proposals")
 def proposals():
     with db() as conn:
         if conn.execute("SELECT to_regclass('public.load_proposals')").fetchone()[0] is None:
@@ -338,7 +408,7 @@ def proposals():
     return page("Chờ duyệt", "".join(t), "/proposals")
 
 
-@app.get("/proposals/{pid}", dependencies=[Depends(auth)])
+@app.get("/proposals/{pid}")
 def proposal(pid: int, err: str = ""):
     with db() as conn:
         k = conn.execute("SELECT coalesce(to_jsonb(lp)->>'kind','documents') FROM load_proposals lp WHERE id=%s", (pid,)).fetchone()
@@ -715,7 +785,7 @@ def ask_claude(question, hits):
     return out, None
 
 
-@app.get("/ask", dependencies=[Depends(auth)])
+@app.get("/ask")
 def ask(q: str = Query("", max_length=500), doc: str = Query("", max_length=40)):
     with db() as conn:
         INDEX.ensure(conn)
@@ -762,7 +832,7 @@ def ask(q: str = Query("", max_length=500), doc: str = Query("", max_length=40))
 chuyên gia cần đối chiếu nguyên văn. Văn bản sửa đổi chỉ được tính nếu khoản sửa đổi nằm trong kết quả tìm.</p></div>""")
     rows = []
     for i, (score, (did, num, loc, text), how) in enumerate(hits, 1):
-        rows.append(f"<div class='art' id='s{i}'><b>[{i}] <a href='/doc/{did}#d{loc.get('dieu')}'>{E(_ref(loc, num))}</a></b> "
+        rows.append(f"<div class='art' id='s{i}'><b>[{i}] <a href='/doc/{did}#d{E(str(loc.get('dieu')))}'>{E(_ref(loc, num))}</a></b> "
                     f"<span class='muted'>{E(loc.get('dieu_title') or '')}</span> <span class='pill{' ok' if '+' in how else ''}'>{E(how)}</span>"
                     f"<p class='law' style='font-size:.9rem'>{E(text.split(chr(10), 1)[-1][:1800])}</p></div>")
     body.append(f"<div class='panel'><h3 style='margin-top:0'>Các khoản tìm được ({len(hits)})</h3>"
