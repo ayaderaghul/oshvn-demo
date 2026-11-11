@@ -4,7 +4,7 @@ Trang xem dữ liệu trong Neon, chỉ đọc. FastAPI một file, chạy trên
 
 - `/` danh sách văn bản · `/doc/{id}` Điều › Khoản · `/search?q=` tìm từ khóa · `/obligations` rule engine · `/runs` nhật ký nạp
 - Biến môi trường (đặt trong Render dashboard, không ghi vào code):
-  - `DATABASE_URL`: chuỗi kết nối Neon của role chỉ đọc `oshvn_web`
+  - `DATABASE_URL`: chuỗi kết nối Neon của role `oshvn_review` (từ 2026-11-11): đọc mọi bảng qua `oshvn_readonly`, chỉ ghi qua `review_proposal()` và `review_proposal_items()`. Quyền của role nằm ở `oshvn_loader/migrations/006_review_role.sql`.
   - `APP_PASSWORD`: mật khẩu xem trang (tên đăng nhập gõ gì cũng được)
 
 Chạy thử trên máy: `pip install -r requirements.txt`, đặt hai biến trên, rồi `uvicorn app:app --reload`.
@@ -23,7 +23,7 @@ Chạy test: `pip install -r requirements.txt httpx`, rồi `python -m unittest 
 
 | Mức độ | File | Lỗi |
 |---|---|---|
-| Cao | Neon, role `oshvn_web` | Role mà app dùng là thành viên của `neon_superuser`: có INSERT, UPDATE, DELETE trên mọi bảng, cùng CREATEROLE và BYPASSRLS (kiểm ngày 2026-11-11). App chỉ đọc nhờ mỗi transaction mở bằng `BEGIN READ ONLY`, và chỉ ghi qua `review_proposal()` và `review_proposal_items()`. Không sửa được role này bằng SQL: Neon cho mọi role tạo trong console vào `neon_superuser` (có `pg_write_all_data`), và chỉ `cloud_admin` của Neon thu hồi hoặc sửa được (đã thử trên một branch ngày 2026-11-11). Cách sửa: tạo role mới bằng SQL, ví dụ `CREATE ROLE oshvn_review LOGIN; GRANT oshvn_readonly TO oshvn_review;` cùng `GRANT EXECUTE` hai hàm duyệt, đặt mật khẩu, đổi `DATABASE_URL` trên Render, rồi xóa `oshvn_web`. Trên branch thử, role như vậy chỉ đọc được và chạy được hai hàm duyệt. |
+| Thấp | Neon, role `oshvn_web` | Từ 2026-11-11 app dùng role `oshvn_review`, không ghi được bảng nào. Role cũ `oshvn_web` (thành viên `neon_superuser`, ghi được mọi bảng) vẫn còn để quay lại nếu cần. Xóa nó trong Neon console khi app đã chạy ổn. Không sửa được `oshvn_web` bằng SQL: chỉ `cloud_admin` của Neon thu hồi được `neon_superuser`. |
 | Trung bình | `app.py` `auth` | Cả team vẫn dùng chung một `APP_PASSWORD`. Tên đăng nhập do người dùng tự gõ được ghi làm `reviewed_by`. Đã có giới hạn 10 lần sai trong 15 phút cho mỗi địa chỉ và bỏ ký tự vô hình khỏi tên, nhưng chưa chứng minh được ai đã duyệt. |
 | Trung bình | `app.py` `ask_claude` | Bộ đếm `ASK_LIMIT_PER_HOUR` nằm trong bộ nhớ của một process. Nó mất khi khởi động lại và không chia sẻ giữa các worker. |
 | Thấp | `app.py` `auth` | Khóa giới hạn đăng nhập là mục cuối của `X-Forwarded-For`, tức địa chỉ do proxy của Render thêm vào. Chạy app không có proxy phía trước thì client tự chọn được khóa này. |
