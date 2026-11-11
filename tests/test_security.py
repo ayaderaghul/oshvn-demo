@@ -47,25 +47,34 @@ class Login(unittest.TestCase):
             with self.subTest(name=repr(blank)):
                 self.assertEqual(webapp.reviewer_name(blank), "")
 
-    def test_spoofed_forwarded_for_entries_do_not_escape_the_throttle(self):
+    def test_one_client_is_one_counter_whatever_proxy_hop_it_came_through(self):
+        # production, 2026-11-11: the same client reached the app with a different last X-Forwarded-For hop per
+        # connection, so a counter keyed on that hop never reached the limit for a guesser who reconnects
         c = client()
-        codes = [c.get("/", headers=basic(password="wrong") | {"x-forwarded-for": f"10.0.0.{i}, 203.0.113.9"}).status_code
+        codes = [c.get("/", headers=basic(password="wrong") | {"cf-connecting-ip": "93.41.0.110",
+                                                                "x-forwarded-for": f"93.41.0.110, 172.68.0.{i}"}).status_code
                  for i in range(webapp.LOGIN_FAILURES_ALLOWED + 1)]
         self.assertEqual(codes[-1], 429)
 
-    def test_another_client_is_not_locked_out_by_spoofing_its_address(self):
+    def test_a_locked_out_client_does_not_lock_out_another(self):
         c = client()
-        for _ in range(webapp.LOGIN_FAILURES_ALLOWED + 1):
-            c.get("/healthz")
-            c.get("/obligations", headers=basic(password="wrong") | {"x-forwarded-for": "198.51.100.7, 203.0.113.9"})
-        r = c.get("/healthz", headers={"x-forwarded-for": "198.51.100.7"})
-        self.assertEqual(r.status_code, 200)
-        self.assertNotIn("198.51.100.7", webapp.FAILED_LOGINS)
+        for i in range(webapp.LOGIN_FAILURES_ALLOWED + 1):
+            c.get("/", headers=basic(password="wrong") | {"cf-connecting-ip": "93.41.0.110", "x-forwarded-for": "172.68.0.9"})
+        other = {"cf-connecting-ip": "198.51.100.7", "x-forwarded-for": "172.68.0.9"}
+        self.assertEqual(c.get("/", headers=basic(password="wrong") | other).status_code, 401)
+        self.assertEqual(c.get("/no-such-page", headers=basic() | other).status_code, 404)   # past the login, not 429
+
+    def test_a_forged_forwarded_for_does_not_change_the_counter(self):
+        c = client()
+        codes = [c.get("/", headers=basic(password="wrong") | {"cf-connecting-ip": "93.41.0.110",
+                                                                "x-forwarded-for": f"10.0.0.{i}"}).status_code
+                 for i in range(webapp.LOGIN_FAILURES_ALLOWED + 1)]
+        self.assertEqual(codes[-1], 429)
 
     def test_requests_without_credentials_leave_no_trace(self):
         c = client()
         for i in range(20):
-            c.get("/", headers={"x-forwarded-for": f"192.0.2.{i}"})
+            c.get("/", headers={"cf-connecting-ip": f"192.0.2.{i}"})
         self.assertEqual(webapp.FAILED_LOGINS, {})
 
     def test_a_correct_login_clears_the_failures(self):

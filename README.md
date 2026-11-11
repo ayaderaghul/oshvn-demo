@@ -23,10 +23,9 @@ Chạy test: `pip install -r requirements.txt httpx`, rồi `python -m unittest 
 
 | Mức độ | File | Lỗi |
 |---|---|---|
-| Thấp | Neon, role `oshvn_web` | Từ 2026-11-11 app dùng role `oshvn_review`, không ghi được bảng nào. Role cũ `oshvn_web` (thành viên `neon_superuser`, ghi được mọi bảng) vẫn còn để quay lại nếu cần. Xóa nó trong Neon console khi app đã chạy ổn. Không sửa được `oshvn_web` bằng SQL: chỉ `cloud_admin` của Neon thu hồi được `neon_superuser`. |
 | Trung bình | `app.py` `auth` | Cả team vẫn dùng chung một `APP_PASSWORD`. Tên đăng nhập do người dùng tự gõ được ghi làm `reviewed_by`. Đã có giới hạn 10 lần sai trong 15 phút cho mỗi địa chỉ và bỏ ký tự vô hình khỏi tên, nhưng chưa chứng minh được ai đã duyệt. |
 | Trung bình | `app.py` `ask_claude` | Bộ đếm `ASK_LIMIT_PER_HOUR` nằm trong bộ nhớ của một process. Nó mất khi khởi động lại và không chia sẻ giữa các worker. |
-| Thấp | `app.py` `auth` | Khóa giới hạn đăng nhập là mục cuối của `X-Forwarded-For`, tức địa chỉ do proxy của Render thêm vào. Chạy app không có proxy phía trước thì client tự chọn được khóa này. |
+| Thấp | `app.py` `auth` | Giới hạn đăng nhập đếm theo `CF-Connecting-IP`, header Cloudflare đặt bằng địa chỉ thật của client (Render đứng sau Cloudflare). Chạy app không qua Cloudflare thì client tự đặt được header này. Giới hạn nằm trong bộ nhớ, mất khi app khởi động lại. |
 | Thấp | `app.py` `check_answer` | Số viết bằng chữ ("hai mươi người") không được kiểm. |
 | Thấp | `app.py` `ask` | Một câu hỏi giữ một luồng tới 60 giây (Claude) cộng 15 giây (Voyage). |
 | Thấp | `app.py` `Index` | Khi loader chỉ đổi vị trí của khoản (tên chương, đường dẫn) mà không đổi chữ, `load_run_id` không đổi, nên `/ask` hiện vị trí cũ tới lần nạp sau. |

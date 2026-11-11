@@ -36,10 +36,11 @@ def reviewer_name(raw):
 
 
 def client_key(request):
-    """Who is guessing passwords. Behind Render's proxy the last X-Forwarded-For entry is the one the proxy added,
-    so a client cannot choose it; entries to its left are whatever the client sent."""
-    xff = request.headers.get("x-forwarded-for", "")
-    return xff.split(",")[-1].strip() if xff.strip() else (request.client.host if request.client else "?")
+    """Who is guessing passwords. Render serves the app behind Cloudflare, which sets CF-Connecting-IP to the real
+    client address and overwrites any value a client sends. X-Forwarded-For is no use: its first entries are whatever
+    the client sent, and its last entry is a proxy hop that changes between connections (seen on 2026-11-11)."""
+    return (request.headers.get("cf-connecting-ip", "").strip()
+            or (request.client.host if request.client else "?"))
 
 
 def auth(request: Request, c: HTTPBasicCredentials | None = Depends(security)):
