@@ -70,6 +70,8 @@ DB = None
 def setup_db(test_module):
     global DB
     if not docker_ok():
+        if os.environ.get("CI"):
+            raise RuntimeError("Docker is not running, and CI must run the database tests rather than skip them")
         raise unittest.SkipTest("Docker is not running")
     DB = Database()
     return DB
