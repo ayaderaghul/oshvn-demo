@@ -26,7 +26,7 @@ def obligations(request: Request):
     with db() as conn:
         rows = conn.execute("""SELECT id, topic, kind, duty_vi, action_vi, article_ref, penalties, change_note,
                                       explain_rule(applies_when, %s::jsonb) AS ex, reviewed, needs_review,
-                                      to_jsonb(o)->>'reviewed_by', review_reason
+                                      to_jsonb(o)->>'reviewed_by' AS reviewed_by, review_reason
                                FROM obligations o WHERE sources IS NOT NULL ORDER BY id""", (json.dumps(prof),)).fetchall()
         rows = [r[:8] + ((r[8] if isinstance(r[8], dict) else {}),) + r[9:] for r in rows]
         sample = conn.execute("SELECT count(*) FROM obligations WHERE sources IS NULL").fetchone()[0]

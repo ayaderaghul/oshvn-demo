@@ -2,6 +2,7 @@ import os
 from contextlib import contextmanager
 
 import psycopg
+from psycopg.rows import namedtuple_row
 from fastapi import HTTPException
 
 
@@ -15,7 +16,7 @@ def database_url():
 @contextmanager
 def db():
     """Read-only: every transaction starts with BEGIN READ ONLY, which also holds through Neon's connection pooler."""
-    with psycopg.connect(database_url(), connect_timeout=15) as conn:
+    with psycopg.connect(database_url(), connect_timeout=15, row_factory=namedtuple_row) as conn:
         conn.read_only = True
         yield conn
 

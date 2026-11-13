@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% set active = "/runs" %}
+{% block title %}Nhật ký nạp{% endblock %}
+{% block content %}
+<h1>Nhật ký nạp</h1><div class='panel scroll'><table><tr><th>#</th><th>Loại</th><th>Kết quả</th><th>Lúc</th><th>Người</th><th>Chi tiết</th></tr>
+{% for r in rows %}
+{% set rep = r.report or {} %}
+{% set det = rep.get('file', '') %}
+{% if 'chunks' in rep %}
+{% set c = rep.chunks if rep.chunks is mapping else {} %}
+{% set det = det ~ ' — ' ~ c.get('new', 0) ~ ' mới, ' ~ c.get('changed', 0) ~ ' đổi, ' ~ c.get('unchanged', 0) ~ ' không đổi, ' ~ c.get('retired', 0) ~ ' ngừng' %}
+{% endif %}
+{% if rep.get('reason') %}{% set det = det ~ ' — ' ~ rep.reason %}{% endif %}
+{% set cls = {'applied': 'ok', 'rejected': 'no', 'dry_run': ''}.get(r.status, '') %}
+<tr><td>{{ r.id }}</td><td>{{ r.kind }}</td><td><span class='pill {{ cls }}'>{{ r.status }}</span></td><td>{{ r.started_at }}</td><td>{{ r.created_by or '' }}</td><td style='font-size:.85rem'>{{ det }}</td></tr>
+{% endfor %}
+</table></div>
+{% endblock %}

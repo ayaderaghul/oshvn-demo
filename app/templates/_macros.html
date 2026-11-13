@@ -1,0 +1,14 @@
+{% macro status_pill(status) %}{% set lab, cls = status_vi.get(status, (status|string, '')) %}<span class='pill {{ cls }}'>{{ lab }}</span>{% endmacro %}
+
+{% macro counts(c) %}{% set c = c if c is mapping else {} %}{{ c.get('new', 0) }} mới / {{ c.get('changed', 0) }} đổi / {{ c.get('retired', 0) }} ngừng{% endmacro %}
+
+{% macro agent_cell(verdict, comment, route, full=false) %}
+{% if not verdict %}
+<td class='muted' style='font-size:.82rem'>— (tạo bằng loader.py propose)</td>
+{% else %}
+{% set lab, cls = verdict_vi.get(verdict, ('?', '')) %}
+{% set how = {'ocr': 'bản scan · OCR + Claude đọc ảnh', 'parse': 'file có chữ'}.get(route or '', route or '') %}
+{% set text = comment or '' %}
+<td style='font-size:.85rem'><span class='pill {{ cls }}'>{{ lab }}</span> <span class='muted'>{{ how }}</span><br>{{ text if full else text[:260] ~ ('…' if text|length > 260 else '') }}</td>
+{% endif %}
+{% endmacro %}

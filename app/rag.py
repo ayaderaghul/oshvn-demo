@@ -22,7 +22,7 @@ Snapshot = namedtuple("Snapshot", "stamp rows tf lens avg idf")
 
 
 # load_run_id moves on every in-place text change and every retire / revive, which count and max(id) do not see
-STAMP_SQL = "SELECT count(*), max(id), max(load_run_id) FROM chunks WHERE source_kind='legal_article' AND NOT coalesce(retired,false)"
+STAMP_SQL = "SELECT count(*) AS n, max(id) AS max_id, max(load_run_id) AS max_run FROM chunks WHERE source_kind='legal_article' AND NOT coalesce(retired,false)"
 
 
 class Index:

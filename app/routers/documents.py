@@ -22,9 +22,9 @@ def documents():
           FROM legal_documents d LEFT JOIN chunks c ON c.document_id=d.id
           GROUP BY d.id ORDER BY (count(c.*)=0), d.number""").fetchall()
         tot, tot_dieu, tot_pl = conn.execute("""
-          SELECT count(*),
-                 count(DISTINCT (document_id, locator->>'dieu')) FILTER (WHERE locator->>'dieu' ~ '^[0-9]+$'),
-                 count(*) FILTER (WHERE locator->>'kind' LIKE 'appendix%')
+          SELECT count(*) AS n,
+                 count(DISTINCT (document_id, locator->>'dieu')) FILTER (WHERE locator->>'dieu' ~ '^[0-9]+$') AS dieu,
+                 count(*) FILTER (WHERE locator->>'kind' LIKE 'appendix%') AS pl
           FROM chunks WHERE source_kind='legal_article' AND NOT coalesce(retired,false)""").fetchone()
     body = [f"<h1>Văn bản trong database</h1><div class='kpis' style='margin:10px 0 14px'><div class='kpi'><b>{len(rows)}</b>văn bản</div><div class='kpi'><b>{tot_dieu:,}</b>điều</div>"
             f"<div class='kpi'><b>{tot - tot_pl:,}</b>khoản và đoạn</div><div class='kpi'><b>{tot_pl:,}</b>mục phụ lục</div></div>"
@@ -48,7 +48,7 @@ def document(doc_id: int):
         hist = []
         if conn.execute("SELECT to_regclass('public.load_proposals')").fetchone()[0]:
             hist = conn.execute("""SELECT id, status, file_name, created_at::timestamp(0), reviewed_by, reviewed_at::timestamp(0), review_note,
-                                          report->'agent'->>'verdict', report->'agent'->>'comment', report->'agent'->>'route', report->'chunks'
+                                          report->'agent'->>'verdict' AS verdict, report->'agent'->>'comment' AS comment, report->'agent'->>'route' AS route, report->'chunks' AS chunks
                                    FROM load_proposals WHERE doc_code=%s AND coalesce(to_jsonb(load_proposals)->>'kind','documents')='documents'
                                    ORDER BY id DESC""", (d[0],)).fetchall()
         rows = conn.execute("""SELECT locator, text FROM chunks WHERE document_id=%s AND source_kind='legal_article' AND NOT coalesce(retired,false)
@@ -111,7 +111,7 @@ def search(q: str = Query("", max_length=300)):
                 anyq = " OR ".join(w for w in re.findall(r"\w+", q) if len(w) > 1)
                 hits = conn.execute("""
                   SELECT d.id, d.number, c.locator, ts_rank(c.tsv, query) AS rank,
-                         ts_headline('vi_simple', c.text, query, 'StartSel=<mark>,StopSel=</mark>,MaxFragments=2,MaxWords=40,MinWords=15')
+                         ts_headline('vi_simple', c.text, query, 'StartSel=<mark>,StopSel=</mark>,MaxFragments=2,MaxWords=40,MinWords=15') AS snip
                   FROM chunks c JOIN legal_documents d ON d.id=c.document_id, websearch_to_tsquery('vi_simple', %s) query
                   WHERE c.source_kind='legal_article' AND NOT coalesce(c.retired,false) AND c.tsv @@ query
                   ORDER BY rank DESC LIMIT 20""", (anyq,)).fetchall() if anyq else []

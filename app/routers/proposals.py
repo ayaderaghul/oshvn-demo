@@ -19,11 +19,11 @@ def proposals():
         if conn.execute("SELECT to_regclass('public.load_proposals')").fetchone()[0] is None:
             return page("Chờ duyệt", "<h1>Chờ duyệt</h1><div class='panel'>Chưa có bảng đề xuất. Chạy <code>python loader.py migrate</code>.</div>", "/proposals")
         rows = conn.execute("""SELECT id, status, doc_code, file_name, created_at::timestamp(0), created_by, reviewed_by,
-                                      report->'chunks', report->'accepted', jsonb_array_length(coalesce(report->'issues','[]')),
-                                      report->'agent'->>'verdict', report->'agent'->>'comment', report->'agent'->>'route',
-                                      coalesce(to_jsonb(lp)->>'kind', 'documents'),
-                                      jsonb_array_length(coalesce(payload->'obligations','[]')),
-                                      jsonb_array_length(coalesce(report->'rejected','[]')), report->>'flagged'
+                                      report->'chunks' AS chunks, report->'accepted' AS accepted, jsonb_array_length(coalesce(report->'issues','[]')) AS n_issues,
+                                      report->'agent'->>'verdict' AS verdict, report->'agent'->>'comment' AS comment, report->'agent'->>'route' AS route,
+                                      coalesce(to_jsonb(lp)->>'kind', 'documents') AS kind,
+                                      jsonb_array_length(coalesce(payload->'obligations','[]')) AS n_obligations,
+                                      jsonb_array_length(coalesce(report->'rejected','[]')) AS n_rejected, report->>'flagged' AS flagged
                                FROM load_proposals lp ORDER BY (status='pending') DESC, id DESC LIMIT 100""").fetchall()
     t = ["<h1>Đề xuất chờ duyệt</h1><p class='muted'>Văn bản luật (agent00, <code>loader.py propose</code>) và nghĩa vụ (agent01). "
          "Duyệt ở đây, rồi chạy <code>python loader.py apply</code> để nạp.</p><div class='panel scroll'><table>"
@@ -43,13 +43,13 @@ def proposals():
 @router.get("/proposals/{pid}")
 def proposal(pid: int, err: str = ""):
     with db() as conn:
-        k = conn.execute("SELECT coalesce(to_jsonb(lp)->>'kind','documents') FROM load_proposals lp WHERE id=%s", (pid,)).fetchone()
-    if k and k[0] == "obligations":
+        k = conn.execute("SELECT coalesce(to_jsonb(lp)->>'kind','documents') AS kind FROM load_proposals lp WHERE id=%s", (pid,)).fetchone()
+    if k and k.kind == "obligations":
         return obligation_proposal(pid, err)
     with db() as conn:
-        r = conn.execute("""SELECT id, status, doc_code, file_name, options, report, payload->'result'->'chunks',
-                                   payload->>'title', created_at::timestamp(0), created_by, reviewed_by, reviewed_at::timestamp(0),
-                                   review_note, apply_report, payload->>'dtype'
+        r = conn.execute("""SELECT id, status, doc_code, file_name, options, report, payload->'result'->'chunks' AS chunks,
+                                   payload->>'title' AS title, created_at::timestamp(0) AS created_at, created_by, reviewed_by, reviewed_at::timestamp(0) AS reviewed_at,
+                                   review_note, apply_report, payload->>'dtype' AS dtype
                             FROM load_proposals WHERE id=%s""", (pid,)).fetchone()
         if not r:
             raise HTTPException(404)
@@ -197,7 +197,7 @@ def record_review(pid, decision, user, note, excl):
 def obligation_proposal(pid, err):
     with db() as conn:
         r = conn.execute("""SELECT id, status, doc_code, payload, report, created_at::timestamp(0), created_by, reviewed_by,
-                                   reviewed_at::timestamp(0), review_note, apply_report, to_jsonb(lp)->'excluded'
+                                   reviewed_at::timestamp(0), review_note, apply_report, to_jsonb(lp)->'excluded' AS excluded
                             FROM load_proposals lp WHERE id=%s""", (pid,)).fetchone()
     if not r: raise HTTPException(404)
     payload, rep = r[3] or {}, r[4] or {}
