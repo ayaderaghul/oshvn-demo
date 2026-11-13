@@ -9,7 +9,7 @@ os.environ["APP_PASSWORD"] = PASSWORD
 os.environ.pop("ANTHROPIC_API_KEY", None)
 os.environ.pop("VOYAGE_API_KEY", None)
 
-import app as webapp  # noqa: E402
+from app import main as webapp  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 

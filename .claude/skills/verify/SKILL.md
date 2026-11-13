@@ -23,7 +23,7 @@ V="py -3.13 .claude/skills/verify/scripts/verify.py"     # any Python 3.12 or la
 	- creates `.venv` and installs `requirements.txt` on first use;
 	- starts `pgvector/pgvector:pg17` labelled `oshvn.demo.verify=1` on a free port and waits until a query from outside the container succeeds twice;
 	- loads `tests/fixtures/schema.sql` (the Neon schema with the loader's migrations), then `fixtures/seed.sql`;
-	- starts the fake model server (`verify.py fake`) and `uvicorn app:app` on free ports, with `APP_PASSWORD` set to a random value and `ASK_API_BASE` and `VOYAGE_API_BASE` pointing at the fake server.
+	- starts the fake model server (`verify.py fake`) and `uvicorn app.main:app` on free ports, with `APP_PASSWORD` set to a random value and `ASK_API_BASE` and `VOYAGE_API_BASE` pointing at the fake server.
 3. Ready means usable: `up` waits until the logged-in home page lists `1/2026/NĐ-CP`, then prints `ready: run <ID> · app http://127.0.0.1:<port> …`.
 
 The seed gives predictable ids in every run: document 1 (`1/2026/NĐ-CP`, five clauses with vectors), obligations `VERIFY-ND1-01` (reviewed by `chi` and flagged) and `VERIFY-ND1-02`, proposal 1 (pending document proposal from agent00, one changed clause), proposal 2 (pending obligation proposal with `ND1-26-A01` and `ND1-26-A02`, A02 flagged by the verifier), and proposal 3 (applied).

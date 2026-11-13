@@ -7,7 +7,7 @@ Trang xem dữ liệu trong Neon, chỉ đọc. FastAPI một file, chạy trên
   - `DATABASE_URL`: chuỗi kết nối Neon của role `oshvn_review` (từ 2026-11-11): đọc mọi bảng qua `oshvn_readonly`, chỉ ghi qua `review_proposal()` và `review_proposal_items()`. Quyền của role nằm ở `oshvn_loader/migrations/006_review_role.sql`.
   - `APP_PASSWORD`: mật khẩu xem trang (tên đăng nhập gõ gì cũng được)
 
-Chạy thử trên máy: `pip install -r requirements.txt`, đặt hai biến trên, rồi `uvicorn app:app --reload`.
+Chạy thử trên máy: `pip install -r requirements.txt`, đặt hai biến trên, rồi `uvicorn app.main:app --reload`.
 
 Mô tả từng hàm, route và hằng số trong `app.py` (đầu vào, đầu ra, tác dụng phụ): [docs/app-reference.md](docs/app-reference.md).
 
