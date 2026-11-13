@@ -3,6 +3,8 @@ import os, threading, unittest
 from collections import Counter
 
 from support import basic, client, webapp
+from app import rules
+from app import views
 from app import claude
 from app import rag
 from app import security
@@ -106,15 +108,15 @@ class ReviewOrigin(unittest.TestCase):
 
 class AgentCell(unittest.TestCase):
     def test_an_unknown_verdict_is_not_written_into_the_page(self):
-        self.assertNotIn("<img", webapp.agent_cell("<img src=x onerror=1>", "c", "parse"))
+        self.assertNotIn("<img", views.agent_cell("<img src=x onerror=1>", "c", "parse"))
 
 
 class Nice(unittest.TestCase):
     def test_words_inside_other_words_are_left_alone(self):
-        self.assertEqual(webapp.nice("trueness falsely needsy"), "trueness falsely needsy")
+        self.assertEqual(rules.nice("trueness falsely needsy"), "trueness falsely needsy")
 
     def test_whole_words_are_translated(self):
-        self.assertEqual(webapp.nice("strict = true"), "Có thiết bị nghiêm ngặt = có")
+        self.assertEqual(rules.nice("strict = true"), "Có thiết bị nghiêm ngặt = có")
 
 
 HITS = [(1.0, (1, "1/2026/NĐ-CP", {"dieu": 2, "khoan": 1}, "Điều 2 — Khoản 1\nPhạt tiền từ 1.000.000 đồng đến 5.000.000 đồng."), "từ khóa")]
