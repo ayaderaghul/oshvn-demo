@@ -1,11 +1,11 @@
 ---
 name: verify
-description: Drive the oshvn-demo review web app (FastAPI, server-rendered HTML, no JavaScript) the way a reviewer does — log in, open pages, approve or reject proposals, ask questions — against a throwaway Postgres with seeded data and local stand-ins for Claude and Voyage, and capture the pages and database state as proof. Use to prove a change to app.py works in the running app, not just in unit tests.
+description: Drive the oshvn-demo review web app (FastAPI, server-rendered HTML, no JavaScript) the way a reviewer does — log in, open pages, approve or reject proposals, ask questions — against a throwaway Postgres with seeded data and local stand-ins for Claude and Voyage, and capture the pages and database state as proof. Use to prove a change to the app package (`app/`) works in the running app, not just in unit tests.
 ---
 
 # Verify oshvn-demo
 
-The app is one FastAPI file, `app.py`, that renders HTML pages with forms and no JavaScript. A browser only follows links and submits forms with Basic auth, so the helper drives it the same way over HTTP: the `Authorization` header, the form token read from the page, and an `Origin` header naming the app. Every run gets its own database container, app process, and ports, so two runs can go side by side.
+The app is the FastAPI package `app/` (entry point `app/main.py`), which renders HTML pages with forms and no JavaScript. A browser only follows links and submits forms with Basic auth, so the helper drives it the same way over HTTP: the `Authorization` header, the form token read from the page, and an `Origin` header naming the app. Every run gets its own database container, app process, and ports, so two runs can go side by side.
 
 All commands run from the repository root. In Git Bash, set `MSYS_NO_PATHCONV=1` first, or Git Bash rewrites `/doc/1` into a Windows path. `V` below is shorthand for:
 
@@ -49,7 +49,7 @@ The feature map in `features/` has one recipe per feature. Read `features/README
 
 Each command saves to `verify_out/<run>/` (gitignored): `NNN-<slug>.html` (the page as served), `NNN-<slug>.txt` (status line, redirect target, and the page text), and `model-calls.jsonl`, `app.log`, `fake.log`. Proof standards:
 
-- Use the user path: the page, then its form. Do not call `app.py` functions or the SQL review functions directly.
+- Use the user path: the page, then its form. Do not call functions from `app/` or the SQL review functions directly.
 - Prove a change by its effect: after a review, query `load_proposals` with `$V sql` and open the page again.
 - A model call is proven by `$V calls`, not by the answer text alone.
 - The fake model server stands in at the app's own `ASK_API_BASE` and `VOYAGE_API_BASE` boundary. It proves the app's handling of answers and errors, not the quality of real model answers.

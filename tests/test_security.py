@@ -2,18 +2,14 @@
 import os, threading, unittest
 from collections import Counter
 
-from support import basic, client, webapp
-from app import rules
-from app import views
-from app import claude
-from app import rag
-from app import security
+from support import basic, client
+from app import claude, main, rag, rules, security, views
 
 
 class EveryRouteNeedsThePassword(unittest.TestCase):
     def test_all_routes_but_healthz_answer_401_without_credentials(self):
         c = client()
-        for route in webapp.app.routes:
+        for route in main.app.routes:
             path = getattr(route, "path", "")
             if not path or path == "/healthz":
                 continue

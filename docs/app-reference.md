@@ -1,6 +1,17 @@
-# app.py reference
+# app package reference
 
-Every function, route, and module-level constant in `app.py`, in file order, with its input, output, and side effects. For known issues, see [README.md](../README.md). For the November review and the status of each finding, see [review-2026-11.md](review-2026-11.md).
+Every function, route, and module-level constant in the `app/` package, in the order they had in the single `app.py` it replaced, with its input, output, and side effects. For known issues, see [README.md](../README.md). For the November review and the status of each finding, see [review-2026-11.md](review-2026-11.md).
+
+Where each part lives. The sections below keep the old single-file order.
+
+- `app/main.py`: the `FastAPI` app, the `security_headers` middleware, `/healthz`, and the routers.
+- `app/db.py`: `database_url`, `db`, `writer`.
+- `app/security.py`: `auth`, the login throttle, `reviewer_name`, `client_key`, `same_origin`, `csrf_token`.
+- `app/views.py`: `page`, `CSS` (read from `app/static/style.css`), `NAV`, and the HTML helpers shared by several routers.
+- `app/rules.py`: `FIELDS`, `SECTORS`, `LABEL`, `nice`, `penalty_label`, `OPS_VI`, `rule_text`, `src_label`.
+- `app/rag.py`: the BM25 `Index`, `INDEX`, and the Voyage vector search.
+- `app/claude.py`: `ask_claude`, the hourly limit, `parse_answer`, `check_answer`.
+- `app/routers/`: one module per page group, `documents.py`, `obligations.py`, `runs.py`, `proposals.py`, `ask.py`.
 
 The SQL functions `review_proposal()`, `review_proposal_items()`, `explain_rule()`, and `rule_matches()`, and the tables the app reads, belong to the `oshvn_loader` repository (`migrations/003`–`006`). The app only calls them.
 

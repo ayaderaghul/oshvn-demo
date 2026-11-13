@@ -4,10 +4,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
 
 import support
-from support import add_document, add_proposal, basic, client, j, webapp
-from app import rag
-from app import db as dbmod
-from app import security
+from support import add_document, add_proposal, basic, client, j
+from app import db as dbmod, rag, security
+from app.routers import ask as ask_router
 
 BAD = "<img src=x onerror=alert(1)>"
 
@@ -59,7 +58,7 @@ class AskFiltersBeforeRanking(unittest.TestCase):
 
 class AskNeedsPost(unittest.TestCase):
     def test_get_with_a_question_does_not_call_the_model(self):
-        with mock.patch.object(webapp, "ask_claude", return_value=(None, "x")) as called:
+        with mock.patch.object(ask_router, "ask_claude", return_value=(None, "x")) as called:
             r = page("/ask?q=huấn+luyện")
         self.assertEqual(r.status_code, 200)
         called.assert_not_called()
@@ -69,7 +68,7 @@ class AskNeedsPost(unittest.TestCase):
         self.assertEqual(r.status_code, 403)
 
     def test_post_with_the_token_calls_the_model(self):
-        with mock.patch.object(webapp, "ask_claude", return_value=(None, "đã gọi")) as called:
+        with mock.patch.object(ask_router, "ask_claude", return_value=(None, "đã gọi")) as called:
             r = client().post("/ask", headers=basic() | {"origin": "http://testserver"},
                               data={"q": "huấn luyện", "token": security.csrf_token("ask")})
         self.assertEqual(r.status_code, 200)
@@ -174,7 +173,7 @@ class VectorFallback(unittest.TestCase):
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         env = {"VOYAGE_API_KEY": "k", "VOYAGE_API_BASE": f"http://127.0.0.1:{srv.server_port}"}
         try:
-            with mock.patch.dict("os.environ", env), mock.patch.object(webapp, "ask_claude", return_value=(None, "x")):
+            with mock.patch.dict("os.environ", env), mock.patch.object(ask_router, "ask_claude", return_value=(None, "x")):
                 r = client().post("/ask", headers=basic() | {"origin": "http://testserver"},
                                   data={"q": "huấn luyện", "token": security.csrf_token("ask")})
         finally:

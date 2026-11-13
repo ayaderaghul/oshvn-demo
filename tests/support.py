@@ -9,7 +9,7 @@ os.environ["APP_PASSWORD"] = PASSWORD
 os.environ.pop("ANTHROPIC_API_KEY", None)
 os.environ.pop("VOYAGE_API_KEY", None)
 
-from app import main as webapp  # noqa: E402
+from app import main  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 
@@ -18,7 +18,7 @@ def basic(user="chi", password=PASSWORD):
 
 
 def client():
-    return TestClient(webapp.app, base_url="http://testserver")
+    return TestClient(main.app, base_url="http://testserver")
 
 
 def docker_ok():
