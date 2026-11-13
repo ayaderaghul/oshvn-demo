@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% set active = "/ask" %}
+{% block title %}Hỏi đáp{% endblock %}
+{% block content %}
+<h1>Hỏi đáp</h1><p class='muted'>Tìm các khoản liên quan trong toàn bộ văn bản đã nạp (BM25, không phân biệt dấu), rồi Claude trả lời
+<b>chỉ dựa trên các khoản đó</b>, kèm số khoản làm căn cứ. Dành cho chuyên gia kiểm tra chất lượng tra cứu — không phải tư vấn pháp lý.</p>
+<form class='row panel' method='post' action='/ask'><input type='hidden' name='token' value='{{ csrf_token("ask") }}'>
+<input name='q' value='{{ q }}' maxlength='500' style='flex:1;min-width:260px' placeholder='ví dụ: công ty xây dựng 120 người có phải thành lập hội đồng ATVSLĐ không?'>
+<select name='doc'><option value=''>Mọi văn bản</option>{% for d in docs %}<option value='{{ d }}' {{ 'selected' if d == doc else '' }}>{{ d }}</option>{% endfor %}</select><button>Hỏi</button></form>
+{% if hits is not none %}
+{% if not hits %}
+<div class='panel'>Không tìm thấy khoản nào chứa các từ trong câu hỏi.</div>
+{% else %}
+{% if err %}
+<p class='err'>{{ err }}</p>
+{% endif %}
+{% if answer %}
+{% set chk = answer.check %}
+<div class='panel' style='border-color:var(--accent)'><h3 style='margin-top:0'>Trả lời</h3>
+<p class='law' style='font-family:inherit;font-size:1rem'>{{ answer.text|cite }}</p>
+{% if chk.bad_cite %}<p class='err'>Câu trả lời dẫn khoản không có trong kết quả tìm: {{ chk.bad_cite|join(', ') }}</p>{% endif %}
+{% if chk.bad_num %}<p class='err'>Con số không có trong các khoản được dẫn: {{ chk.bad_num|join(', ') }} — kiểm tra lại với nguyên văn.</p>{% endif %}
+{% if chk.no_cite %}<p class='err'>Câu trả lời không dẫn khoản nào — không dùng được nếu chưa đối chiếu nguyên văn.</p>{% endif %}
+{% if answer.not_found %}<p class='muted'><b>Không tìm thấy căn cứ:</b> {{ answer.not_found }}</p>{% endif %}
+<p class='muted' style='font-size:.78rem;margin-bottom:0'>{{ answer.usage[0] }} · {{ answer.usage[1] }} token vào, {{ answer.usage[2] }} token ra. Câu trả lời do model viết từ các khoản bên dưới;
+chuyên gia cần đối chiếu nguyên văn. Văn bản sửa đổi chỉ được tính nếu khoản sửa đổi nằm trong kết quả tìm.</p></div>
+{% endif %}
+<div class='panel'><h3 style='margin-top:0'>Các khoản tìm được ({{ hits|length }})</h3>
+<p class='muted' style='font-size:.82rem'>Cách tìm: {{ mode or '' }}</p>
+{% for score, row, how in hits %}
+{% set did, num, loc, text = row[:4] %}
+<div class='art' id='s{{ loop.index }}'><b>[{{ loop.index }}] <a href='/doc/{{ did }}#d{{ loc.get('dieu') }}'>{{ hit_ref(loc, num) }}</a></b> <span class='muted'>{{ loc.get('dieu_title') or '' }}</span> <span class='pill{{ ' ok' if '+' in how else '' }}'>{{ how }}</span>
+<p class='law' style='font-size:.9rem'>{{ text.split('\n', 1)[-1][:1800] }}</p></div>
+{% endfor %}
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

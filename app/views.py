@@ -41,6 +41,10 @@ def mark(snip):
     return Markup(E(snip).replace("&lt;mark&gt;", "<mark>").replace("&lt;/mark&gt;", "</mark>"))
 
 
+def cite(text):
+    return Markup(re.sub(r"\[([0-9]{1,6})\]", lambda m: f"<a href='#s{m.group(1)}'>[{m.group(1)}]</a>", E(text)))
+
+
 def word_diff(old, new):
     a, b = re.findall(r"\S+|\s+", old or ""), re.findall(r"\S+|\s+", new or "")
     out = []
