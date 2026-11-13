@@ -17,7 +17,7 @@
 <td>{{ counts(r.chunks) }}</td>
 {{ agent_cell(r.verdict, r.comment, r.route) }}
 {% endif %}
-<td style='font-size:.82rem'>{% for x in r.accepted or [] %}{{ x.split(':')[0] }}{% if not loop.last %}, {% endif %}{% else %}—{% endfor %}<br><span class='muted'>{{ r.n_issues }} ghi chú parser</span></td>
+<td style='font-size:.82rem'>{% set exc %}{% for x in r.accepted or [] %}{{ x.split(':')[0] }}{% if not loop.last %}, {% endif %}{% endfor %}{% endset %}{{ exc or '—' }}<br><span class='muted'>{{ r.n_issues }} ghi chú parser</span></td>
 <td style='font-size:.82rem'>{{ r.created_at }}<br>{{ r.created_by or '' }}</td><td>{{ r.reviewed_by or '' }}</td></tr>
 {% else %}
 <tr><td colspan=8 class='muted'>Chưa có đề xuất nào.</td></tr>
