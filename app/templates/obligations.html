@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% set active = "/obligations" %}
+{% block title %}Nghĩa vụ{% endblock %}
+{% block content %}
+<h1>Nghĩa vụ và rule engine</h1><p class='muted'>Mỗi nghĩa vụ được kiểm tra bằng hàm <code>explain_rule()</code> chạy trong Postgres với hồ sơ bên dưới. Không dùng AI.</p>
+<form class='panel' method='get'><div class='row' style='margin-bottom:8px'>
+<label>Ngành<br><select name='sector'>{% for k, v in sectors.items() %}<option value='{{ k }}' {{ 'selected' if k == prof.sector else '' }}>{{ v[0] }}</option>{% endfor %}</select></label>
+<label>Số lao động<br><input name='n' type='number' min='1' value='{{ prof.n }}' style='width:110px'></label>
+<label>Vai trò<br><select name='role'>{% for k, v in (('contractor', 'Nhà thầu thi công'), ('owner', 'Chủ đầu tư'), ('none', 'Không tham gia XD')) %}<option value='{{ k }}' {{ 'selected' if k == prof.role else '' }}>{{ v }}</option>{% endfor %}</select></label></div><div class='row'>
+{% for f, l, t in fields if t == 'bool' %}
+<label class='c'><input type='checkbox' name='{{ f }}' value='1' {{ 'checked' if prof[f] else '' }}>{{ l }}</label>
+{% endfor %}
+<button>Áp dụng</button></div></form>
+<div class='kpis' style='margin-bottom:12px'><div class='kpi'><b>{{ applied }}</b>áp dụng</div><div class='kpi'><b>{{ rows|length - applied }}</b>không áp dụng</div></div>
+{% if rows %}
+<div class='panel scroll'><table><tr><th>Mã</th><th>Chủ đề</th><th>Điều khoản</th><th>Nội dung</th><th>Vì sao</th><th>Phạt</th></tr>
+{% for r in rows %}
+{% set ok = r.ex.get('applies') %}
+{% set why = (r.ex.get('reasons') if ok else r.ex.get('missing')) or [] %}
+<tr style='{{ '' if ok else 'opacity:.55' }}'><td>{{ r.id }}<br>{% if ok %}<span class='pill ok'>Áp dụng</span>{% else %}<span class='pill'>N/A</span>{% endif %}
+{% if r.reviewed %} <span class='pill ok'>đã duyệt bởi {{ r.reviewed_by or '?' }}</span>{% endif %}
+{% if r.needs_review %} <span class='pill no' title='{{ r.review_reason or '' }}'>cần xem lại</span>{% endif %}
+{% if r.change_note %} <span class='pill no'>đã thay đổi</span>{% endif %}</td><td>{{ r.topic or '' }}</td><td style='font-size:.82rem'>{{ r.article_ref or '' }}</td>
+<td>{{ r.duty_vi or '' }}<br><span class='muted' style='font-size:.85rem'>→ {{ r.action_vi or '' }}</span></td>
+<td style='font-size:.82rem'>{% for w in why %}{{ w|nice }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td><td style='font-size:.8rem'>{% for p in r.penalties[:2] %}{{ p|penalty_label }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td></tr>
+{% endfor %}
+</table></div>
+{% else %}
+<div class='panel'>Chưa có nghĩa vụ nào có căn cứ (<code>sources</code>). Nạp bằng <code>python loader.py obligations data/obligations.json</code>. ({{ sample }} nghĩa vụ mẫu cũ không hiển thị.)</div>
+{% endif %}
+{% endblock %}
