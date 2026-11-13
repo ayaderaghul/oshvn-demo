@@ -9,6 +9,8 @@ Trang xem dữ liệu trong Neon, chỉ đọc. FastAPI một file, chạy trên
 
 Chạy thử trên máy: `pip install -r requirements.txt`, đặt hai biến trên, rồi `uvicorn app.main:app --reload`.
 
+HTML nằm trong `app/templates/` (Jinja2, tự escape); route chỉ lấy dữ liệu rồi chọn template.
+
 Mô tả từng hàm, route và hằng số trong package `app/` (đầu vào, đầu ra, tác dụng phụ): [docs/app-reference.md](docs/app-reference.md).
 
 ## Known issues
@@ -36,9 +38,8 @@ Chạy test: `pip install -r requirements.txt httpx`, rồi `python -m unittest 
 
 | Mức độ | File | Lỗi |
 |---|---|---|
-| Cao | `app/` | HTML dựng bằng f-string, escape bằng tay với `E()` ở khoảng 150 chỗ. Các lỗi XSS của lượt review đến từ đây. |
-| Cao | `app/` | Một package `app/` chứa truy cập dữ liệu, dựng HTML, CSS, tìm kiếm BM25 và vector, client LLM, CSRF và giới hạn tần suất. Đã có test trong `tests/`, chưa có CI. |
-| Trung bình | `app/` | Hợp đồng với `oshvn_loader` không được ghi ở đâu: khóa JSON của `payload` và `report` (`_verify`, `_amended_by`, `texts`, `checks`, `agent`…), tên trạng thái, cột `kind` và `excluded`, và chuỗi tiếng Việt `"mới"` mà app dùng để rẽ nhánh. Hàng được đọc theo chỉ số tuple (`r[0]`…`r[16]`). Truy cập `x['key']` trực tiếp làm cả trang danh sách lỗi 500 khi loader đổi một khóa. |
+| Cao | `app/` | Một package `app/` chứa truy cập dữ liệu, CSS, tìm kiếm BM25 và vector, client LLM, CSRF và giới hạn tần suất. Đã có test trong `tests/`, chưa có CI. |
+| Trung bình | `app/` | Hợp đồng với `oshvn_loader` không được ghi ở đâu: khóa JSON của `payload` và `report` (`_verify`, `_amended_by`, `texts`, `checks`, `agent`…), tên trạng thái, cột `kind` và `excluded`, và chuỗi tiếng Việt `"mới"` mà app dùng để rẽ nhánh. Hàng được đọc theo tên cột (namedtuple), nên đổi tên hoặc bí danh cột trong SELECT làm vỡ template. Truy cập `x['key']` trực tiếp làm cả trang danh sách lỗi 500 khi loader đổi một khóa. |
 | Trung bình | `app/routers/proposals.py` `proposals`, `proposal`, `review` | Các kiểm tra `to_jsonb(lp)->>'kind'` và `to_regclass('public.load_proposals')` lặp ở nhiều truy vấn để chạy được trên database chưa migrate. Rẽ nhánh theo `kind` nằm ở ba chỗ. |
 | Trung bình | `app/db.py` `db` | Mỗi truy vấn mở một kết nối mới tới Neon, không có pool. `/ask` mở hai hoặc ba kết nối. |
 | Trung bình | `app/claude.py` `ask_claude` | Một hàm đọc biến môi trường, giới hạn tần suất, dựng prompt, gọi HTTP và tách JSON. Prompt chứa một quy tắc pháp lý viết cứng (mức phạt tổ chức gấp 2 lần theo NĐ 283/2026). Kiểm số và kiểm khoản dẫn nằm trong route `ask`, không tách được ra để test. |

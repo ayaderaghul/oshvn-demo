@@ -3,7 +3,8 @@ import os, threading, unittest
 from collections import Counter
 
 from support import basic, client
-from app import claude, main, rag, rules, security, views
+from app import claude, main, rag, rules, security
+from app.templating import templates
 
 
 class EveryRouteNeedsThePassword(unittest.TestCase):
@@ -103,8 +104,12 @@ class ReviewOrigin(unittest.TestCase):
 
 
 class AgentCell(unittest.TestCase):
+    def render(self, *args):
+        return str(templates.env.get_template("_macros.html").module.agent_cell(*args))
+
     def test_an_unknown_verdict_is_not_written_into_the_page(self):
-        self.assertNotIn("<img", views.agent_cell("<img src=x onerror=1>", "c", "parse"))
+        self.assertNotIn("<img", self.render("<img src=x onerror=1>", "c", "parse"))
+        self.assertNotIn("<img", self.render("ok", "<img src=x onerror=1>", "<b>x</b>"))
 
 
 class Nice(unittest.TestCase):

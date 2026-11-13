@@ -7,7 +7,9 @@ Where each part lives. The sections below keep the old single-file order.
 - `app/main.py`: the `FastAPI` app, the `security_headers` middleware, `/healthz`, and the routers.
 - `app/db.py`: `database_url`, `db`, `writer`.
 - `app/security.py`: `auth`, the login throttle, `reviewer_name`, `client_key`, `same_origin`, `csrf_token`.
-- `app/views.py`: `page`, `CSS` (read from `app/static/style.css`), `NAV`, and the HTML helpers shared by several routers.
+- `app/templating.py`: the Jinja2 `templates` environment (autoescape on, `StrictUndefined`), the inlined `css`, and the globals and filters the templates use.
+- `app/templates/`: `base.html` (page shell and navigation), `_macros.html` (`status_pill`, `counts`, `agent_cell`), and one template per page.
+- `app/views.py`: the Python behind the template filters: `mark`, `cite`, `dumps`, `word_diff`, and the `STATUS_VI` and `VERDICT_VI` label tables.
 - `app/rules.py`: `FIELDS`, `SECTORS`, `LABEL`, `nice`, `penalty_label`, `OPS_VI`, `rule_text`, `src_label`.
 - `app/rag.py`: the BM25 `Index`, `INDEX`, and the Voyage vector search.
 - `app/claude.py`: `ask_claude`, the hourly limit, `parse_answer`, `check_answer`.
@@ -29,7 +31,7 @@ In production the app runs on Render behind Cloudflare, connects to Neon as the 
 
 | Term | Meaning |
 |---|---|
-| `E` | `html.escape` with `quote=True`. Every text value from the database or the model goes through `E` before it enters HTML. Integers, timestamps, and strings built from constants do not. |
+| Autoescape | Jinja escapes every `{{ }}` value in the templates. Only `Markup` values skip it: the `mark`, `cite`, and `word_diff` results, which escape the text first, and the inlined `css`. Jinja writes `'` as `&#39;` and `"` as `&#34;`. |
 | Client key | The value `client_key` returns: the `CF-Connecting-IP` header, or the socket address when the header is missing. Failed logins are counted per client key. |
 | Proposal kind | `documents` (from agent00 or `loader.py propose`) or `obligations` (from agent01). Read as `coalesce(to_jsonb(lp)->>'kind', 'documents')`, so the app also runs on a database without the `kind` column. |
 | Proposal status | `pending`, `approved`, `rejected`, `applied`, `superseded`, or `failed`. The app changes only `pending` to `approved` or `rejected`. `loader.py apply` writes approved proposals. |
@@ -60,35 +62,29 @@ In production the app runs on Render behind Cloudflare, connects to Neon as the 
 
 **`database_url() -> str`.** Returns `DATABASE_URL`. Raises 500 "Chưa đặt DATABASE_URL trên Render" when it is unset.
 
-**`db()`.** Context manager. Yields a psycopg connection with `connect_timeout=15` and `read_only=True`, so every transaction starts with `BEGIN READ ONLY`.
+**`db()`.** Context manager. Yields a psycopg connection with `connect_timeout=15` and `read_only=True`, so every transaction starts with `BEGIN READ ONLY`. Rows come back as named tuples, so templates read `r.status`. A SELECT with two unaliased expressions needs `AS` names, or `namedtuple_row` raises on the duplicate name.
 
 **`writer()`.** Context manager. Yields an autocommit connection with `connect_timeout=15`.
 
 ## Page shell
 
-**`CSS`.** The style sheet, with light and dark color variables.
-
-**`NAV`.** The six navigation tabs as `(href, label)`.
-
-**`page(title, body, active="/") -> HTMLResponse`**
-- Input: the page title (escaped), the body as ready HTML (not escaped), and the active tab path.
-- Output: the full HTML document with `lang="vi"`, the navigation, and the footer note.
+**`templates`.** `Jinja2Templates` over `app/templates`. Routes call `templates.TemplateResponse(request, "name.html", context)`. Each page template extends `base.html`, sets `active` to its navigation path, and fills the `title` and `content` blocks. `base.html` holds the six navigation tabs, inlines `css` (read from `app/static/style.css`), and adds the footer note.
 
 **`healthz()`.** `GET /healthz`. Returns `ok` as plain text. Needs no password.
 
 ## Documents, search, obligations, and runs
 
-**`documents()`.** `GET /`.
-- DB: one row per document, `[id, number, type, title_vi, status, parser_version, source_file, n, emb, dieu, pl]`, where `n` counts live legal-article chunks, `emb` counts embeddings, `dieu` counts distinct numeric `locator->>'dieu'`, and `pl` counts appendix chunks. Documents with no chunks sort last. A second query returns the totals `tot`, `tot_dieu`, and `tot_pl`.
+**`documents(request)`.** `GET /`.
+- DB: one row per document, `[id, number, type, title_vi, status, parser_version, source_file, n, emb, dieu, pl]`, where `n` counts live legal-article chunks, `emb` counts embeddings, `dieu` counts distinct numeric `locator->>'dieu'`, and `pl` counts appendix chunks. Documents with no chunks sort last. A second query returns the totals `tot` as `[n, dieu, pl]`.
 - Output: the document table. The number links to `/doc/{id}` only when `n > 0`. "Khoản và đoạn" shows `n - pl`. Titles are cut at 140 characters. A document without `source_file` shows "dữ liệu mẫu ban đầu".
 
-**`document(doc_id: int)`.** `GET /doc/{doc_id}`.
+**`document(request, doc_id: int)`.** `GET /doc/{doc_id}`.
 - DB: `legal_documents(number, title_vi, type, check_report)`. When the table `load_proposals` exists, the document proposals for this number as `(id, status, file_name, created_at, reviewed_by, reviewed_at, review_note, verdict, comment, route, report->'chunks')`. The live legal-article chunks `(locator, text)`, ordered with appendices last, then by Điều, khoản, and seq.
-- Output: the document page, or 404. Chunks are grouped by `locator["dieu"]`, and each text loses its first line, the heading. The table of contents adds a heading when the Chương changes, and "Phụ lục" for appendix items. Each part is labeled "Khoản N", "Mục N" for appendix items, "Mở đầu" for `kind = lead`, or "Đoạn". `check_report` entries `{ok, name, detail}` show as ĐẠT and LỖI pills. The history table uses `status_pill`, `counts`, and `agent_cell(full=True)`.
+- Output: the document page, or 404. Chunks are grouped by `locator["dieu"]`, and each text loses its first line, the heading. The table of contents adds a heading when the Chương changes, and "Phụ lục" for appendix items. Each part is labeled "Khoản N", "Mục N" for appendix items, "Mở đầu" for `kind = lead`, or "Đoạn". `check_report` entries `{ok, name, detail}` show as ĐẠT and LỖI pills. The history table uses the `status_pill`, `counts`, and `agent_cell(full=True)` macros.
 
-**`search(q)`.** `GET /search`, with `q` up to 300 characters.
+**`search(request, q)`.** `GET /search`, with `q` up to 300 characters.
 - DB: `websearch_to_tsquery('vi_simple', q)` against `chunks.tsv`, ranked by `ts_rank`, with `ts_headline` snippets marked by `<mark>`. When nothing matches, the query runs again with the words longer than one character joined by `OR`.
-- Output: up to 20 hits. The snippet is escaped, and then only the exact strings `&lt;mark&gt;` and `&lt;/mark&gt;` are turned back into tags. Each hit links to `/doc/{id}#d{dieu}`.
+- Output: up to 20 hits. The `mark` filter escapes the snippet, and then turns only the exact strings `&lt;mark&gt;` and `&lt;/mark&gt;` back into tags. Each hit links to `/doc/{id}#d{dieu}`.
 
 **`FIELDS`, `SECTORS`, `LABEL`.** The profile fields as `(key, label, type)`, with type `select`, `number`, `role`, or `bool`. The sectors as `code → (name, g36, g37)`, where `g36` and `g37` mark the sectors listed in Điều 36 and Điều 37 khoản 1 of NĐ 39. `LABEL` maps every field key, plus `g36` and `g37`, to its label.
 
@@ -104,7 +100,7 @@ In production the app runs on Render behind Cloudflare, connects to Neon as the 
 - Output: the profile form, the counts of obligations that apply and do not apply, and the table. Applying obligations come first and show `ex.reasons`. The others show `ex.missing`. Tags show "Áp dụng" or "N/A", "đã duyệt bởi …", "cần xem lại" with `review_reason` as its title, and "đã thay đổi". Only the first two penalties show.
 - Rules: the checkbox defaults (`strict`, `hazardous`, and `kcn` on) apply only while `n` is absent from the query string. After the first submit, a checkbox is on only when its value is `1`. An `ex` that is not a dict is treated as `{}`.
 
-**`runs()`.** `GET /runs`.
+**`runs(request)`.** `GET /runs`.
 - DB: the latest 50 rows of `load_runs` as `[id, kind, status, started_at, created_by, report]`.
 - Output: the run table. The detail column shows `report.file`, the `report.chunks` counts read with `.get`, and `report.reason`.
 
@@ -112,23 +108,23 @@ In production the app runs on Render behind Cloudflare, connects to Neon as the 
 
 **`STATUS_VI`.** Status → (Vietnamese label, CSS class).
 
-**`status_pill(status) -> str`.** A pill with the Vietnamese label. An unknown status shows as its own escaped text.
+**`status_pill(status)`.** Macro in `_macros.html`. A pill with the Vietnamese label. An unknown status shows as its own escaped text.
 
-**`counts(c) -> str`.** The escaped string `"N mới / N đổi / N ngừng"` from a chunk-count dict. A value that is not a dict gives zeros.
+**`counts(c)`.** Macro in `_macros.html`. The string `"N mới / N đổi / N ngừng"` from a chunk-count dict. A value that is not a dict gives zeros.
 
 **`csrf_token(pid) -> str`.** See the CSRF token in [Terms](#terms).
 
-**`word_diff(old, new) -> str`.** Splits both texts into word and space tokens and compares them with `difflib.SequenceMatcher(autojunk=False)`. Returns escaped text with removed parts in `<del>` and added parts in `<ins>`.
+**`word_diff(old, new) -> Markup`.** Splits both texts into word and space tokens and compares them with `difflib.SequenceMatcher(autojunk=False)`. Returns escaped text with removed parts in `<del>` and added parts in `<ins>`.
 
 **`VERDICT_VI`.** agent00 verdict (`ok`, `check`, or `reject`) → (label, CSS class).
 
-**`agent_cell(verdict, comment, route, full=False) -> str`.** A `<td>` with the verdict pill, the route (`ocr` or `parse`), and the comment. Without a verdict, shows "— (tạo bằng loader.py propose)". An unknown verdict shows "?". The comment is cut at 260 characters unless `full` is true.
+**`agent_cell(verdict, comment, route, full=false)`.** Macro in `_macros.html`. A `<td>` with the verdict pill, the route (`ocr` or `parse`), and the comment. Without a verdict, shows "— (tạo bằng loader.py propose)". An unknown verdict shows "?". The comment is cut at 260 characters unless `full` is true.
 
-**`proposals()`.** `GET /proposals`.
-- DB: up to 100 proposals, pending first, newest first, as 17 columns. Index 7 is the chunk counts, 10 to 12 are the agent verdict, comment, and route, 13 is the kind, and 14 to 16 are the obligation, rejected, and flagged counts.
+**`proposals(request)`.** `GET /proposals`.
+- DB: up to 100 proposals, pending first, newest first, as 17 named columns, among them `chunks`, `verdict`, `comment`, `route`, `kind`, `n_obligations`, `n_rejected`, and `flagged`.
 - Output: the proposal list, or a notice when the table `load_proposals` does not exist. An obligation row shows "N đạt kiểm tra · M bị loại · K có ý không có căn cứ". A document row shows `counts` and `agent_cell`.
 
-**`proposal(pid, err="")`.** `GET /proposals/{pid}`.
+**`proposal(request, pid, err="")`.** `GET /proposals/{pid}`.
 - Input: the proposal id, and `err` as `name` or `db`. Other `err` values are ignored.
 - DB: the proposal kind. For `obligations`, the work moves to `obligation_proposal`. For `documents`, one row `[id, status, doc_code, file_name, options, report, chunks, title, created_at, created_by, reviewed_by, reviewed_at, review_note, apply_report, dtype]` and a check that `legal_documents.number = doc_code` exists.
 - Output: the review page, or 404. The page has six panels.
@@ -164,7 +160,7 @@ In production the app runs on Render behind Cloudflare, connects to Neon as the 
 
 **`src_label(s) -> str`.** `[doc, dieu, khoan]` → "{doc} Điều {dieu} khoản {khoan}", without the khoản part when `khoan` is `None`.
 
-**`obligation_proposal(pid, err)`**
+**`obligation_proposal(request, pid, err)`**
 - DB: one row with `payload` (`obligations` and `texts`, keyed `"doc|dieu|khoan"`), `report` (`agent`, `flagged`, `rejected`, `new_fields`, and `log`), the review columns, and `excluded` read through `to_jsonb`.
 - Output: the review page for an obligation proposal, or 404. Each obligation shows its id, topic, kind, frequency, content, action, evidence, `rule_text(applies_when)`, `calc`, `change_note`, and penalties.
 	- `_verify.unsupported` entries show as errors and give the panel a yellow border. `_verify.inferred` entries show as notes.
@@ -223,11 +219,9 @@ In production the app runs on Render behind Cloudflare, connects to Neon as the 
 - Parses the `{…}` part of the reply as JSON and adds `_usage = (model, input tokens, output tokens)`.
 - Releases the reserved call on an HTTP or network error. Does not release it when the reply is not valid JSON or not a JSON object.
 
-**`ask_form(q="", doc="", docs=()) -> str`.** The question form: `POST /ask` with a hidden `csrf_token("ask")`, a question field of up to 500 characters, and the document list.
+**`doc_numbers(conn) -> list[str]`.** The numbers of documents that have at least one chunk.
 
-**`doc_numbers() -> list[str]`.** The numbers of documents that have at least one chunk.
-
-**`ask_page(q, doc)`.** `GET /ask`. Shows only the form, with `q` and `doc` filled in. It calls no model.
+**`ask_page(request, q, doc)`.** `GET /ask`. Shows only the form (`ask.html`: `POST /ask` with a hidden `csrf_token("ask")`, a question field of up to 500 characters, and the document list), with `q` and `doc` filled in. It calls no model.
 
 **`ask(request, q, doc, token)`.** `POST /ask`.
 - Input: form fields `q` (up to 500 characters), `doc` (up to 40), and `token`.
@@ -238,7 +232,7 @@ In production the app runs on Render behind Cloudflare, connects to Neon as the 
 	4. When a vector model exists: `embed_query` with no connection held, then `vector_rows` in a second `db()` block.
 	5. `fuse` the BM25 and vector results, or take the 12 best BM25 rows when there are no vector rows. With no hits, show "Không tìm thấy khoản nào chứa các từ trong câu hỏi." and call no model.
 	6. `ask_claude`, then `parse_answer` and `check_answer`.
-- The answer is escaped, and then each `[n]` becomes a link to clause `n`. `bad_cite`, `bad_num`, and `no_cite` each show a warning. The answer always shows. Each clause shows its number, a link to `/doc/{id}#d{dieu}`, how it was found, and its text cut at 1800 characters.
+- The `cite` filter escapes the answer, and then each `[n]` becomes a link to clause `n`. `bad_cite`, `bad_num`, and `no_cite` each show a warning. The answer always shows. Each clause shows its number, a link to `/doc/{id}#d{dieu}`, how it was found, and its text cut at 1800 characters.
 
 ## Request flows
 
