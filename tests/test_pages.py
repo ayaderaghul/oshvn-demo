@@ -5,6 +5,8 @@ from unittest import mock
 
 import support
 from support import add_document, add_proposal, basic, client, j, webapp
+from app import db as dbmod
+from app import security
 
 BAD = "<img src=x onerror=alert(1)>"
 
@@ -30,17 +32,17 @@ def page(path, **kw):
 
 def review(pid, data, origin="http://testserver"):
     headers = basic() | ({"origin": origin} if origin else {})
-    return client().post(f"/proposals/{pid}/review", headers=headers, data={"token": webapp.csrf_token(pid), **data}, follow_redirects=False)
+    return client().post(f"/proposals/{pid}/review", headers=headers, data={"token": security.csrf_token(pid), **data}, follow_redirects=False)
 
 
 class FreshIndex(unittest.TestCase):
     def test_a_clause_changed_in_place_is_searched_with_its_new_text(self):
-        with webapp.db() as conn:
+        with dbmod.db() as conn:
             webapp.INDEX.ensure(conn)
         run = db.sql("INSERT INTO load_runs(kind, status) VALUES ('documents','applied') RETURNING id")[0][0]
         db.sql("""UPDATE chunks SET text = text || ' Kiểm định thang máy.', load_run_id=%s
                   WHERE id = (SELECT min(id) FROM chunks WHERE document_id=%s)""", (run, DOC_B))
-        with webapp.db() as conn:
+        with dbmod.db() as conn:
             webapp.INDEX.ensure(conn)
         self.assertTrue(any("thang máy" in row[3] for _, row in webapp.INDEX.search("thang máy")))
 
@@ -48,7 +50,7 @@ class FreshIndex(unittest.TestCase):
 class AskFiltersBeforeRanking(unittest.TestCase):
     def test_a_document_outside_the_global_top_hits_is_still_found(self):
         r = client().post("/ask", headers=basic() | {"origin": "http://testserver"},
-                          data={"q": "huấn luyện an toàn", "doc": "2/2026/NĐ-CP", "token": webapp.csrf_token("ask")})
+                          data={"q": "huấn luyện an toàn", "doc": "2/2026/NĐ-CP", "token": security.csrf_token("ask")})
         self.assertEqual(r.status_code, 200)
         self.assertIn("mới tuyển dụng", r.text)
         self.assertNotIn("Không tìm thấy khoản nào", r.text)
@@ -68,7 +70,7 @@ class AskNeedsPost(unittest.TestCase):
     def test_post_with_the_token_calls_the_model(self):
         with mock.patch.object(webapp, "ask_claude", return_value=(None, "đã gọi")) as called:
             r = client().post("/ask", headers=basic() | {"origin": "http://testserver"},
-                              data={"q": "huấn luyện", "token": webapp.csrf_token("ask")})
+                              data={"q": "huấn luyện", "token": security.csrf_token("ask")})
         self.assertEqual(r.status_code, 200)
         called.assert_called_once()
 
@@ -173,7 +175,7 @@ class VectorFallback(unittest.TestCase):
         try:
             with mock.patch.dict("os.environ", env), mock.patch.object(webapp, "ask_claude", return_value=(None, "x")):
                 r = client().post("/ask", headers=basic() | {"origin": "http://testserver"},
-                                  data={"q": "huấn luyện", "token": webapp.csrf_token("ask")})
+                                  data={"q": "huấn luyện", "token": security.csrf_token("ask")})
         finally:
             srv.shutdown()
             db.sql("UPDATE chunks SET embedding=NULL, embedding_model=NULL WHERE document_id=%s", (DOC_B,))

@@ -4,62 +4,18 @@ Pages: documents · one document (Điều › Khoản) · keyword search · obli
 Environment: DATABASE_URL (role oshvn_web: reads tables; its only write is the review_proposal() function),
 APP_PASSWORD (HTTP Basic; the user name is recorded as the reviewer).
 """
-import difflib, hashlib, hmac, html, json, math, os, re, secrets, threading, time, unicodedata, urllib.error, urllib.request
+import difflib, hmac, html, json, math, os, re, threading, time, unicodedata, urllib.error, urllib.request
 from collections import Counter, deque, namedtuple
-from urllib.parse import urlsplit
-from contextlib import contextmanager
 
 import psycopg
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-security = HTTPBasic(auto_error=False)
+from app.db import db, writer
+from app.security import auth, csrf_token, same_origin
+
 E = html.escape
-PUBLIC_PATHS = {"/healthz"}
-LOGIN_FAILURES_ALLOWED = 10          # per client address, within LOGIN_WINDOW seconds
-LOGIN_WINDOW = 900
-FAILED_LOGINS, _login_lock = {}, threading.Lock()
-
-
-def reviewer_name(raw):
-    """The Basic-auth user name, recorded as the reviewer. Invisible and blank-looking characters (U+200B, Hangul
-    fillers, braille blank…) are dropped; a name with no letter or digit left is no name."""
-    def visible(ch):
-        name = unicodedata.name(ch, "")
-        return (ch.isprintable() and unicodedata.category(ch) not in ("Cf", "Cc", "Zs")
-                and "FILLER" not in name and name != "BRAILLE PATTERN BLANK")
-    s = unicodedata.normalize("NFKC", raw or "")
-    s = " ".join("".join(ch if ch == " " or visible(ch) else "" for ch in s).split())
-    return s if any(ch.isalnum() for ch in s) else ""
-
-
-def client_key(request):
-    """Who is guessing passwords. Render serves the app behind Cloudflare, which sets CF-Connecting-IP to the real
-    client address and overwrites any value a client sends. X-Forwarded-For is no use: its first entries are whatever
-    the client sent, and its last entry is a proxy hop that changes between connections (seen on 2026-11-11)."""
-    return (request.headers.get("cf-connecting-ip", "").strip()
-            or (request.client.host if request.client else "?"))
-
-
-def auth(request: Request, c: HTTPBasicCredentials | None = Depends(security)):
-    if request.url.path in PUBLIC_PATHS:
-        return ""
-    key, now = client_key(request), time.time()
-    with _login_lock:
-        fails = FAILED_LOGINS.get(key)
-        while fails and now - fails[0] > LOGIN_WINDOW: fails.popleft()
-        if fails is not None and not fails: del FAILED_LOGINS[key]
-        if fails and len(fails) >= LOGIN_FAILURES_ALLOWED:
-            raise HTTPException(429, "Sai mật khẩu quá nhiều lần — thử lại sau 15 phút")
-    pw = os.environ.get("APP_PASSWORD")
-    if not pw or c is None or not secrets.compare_digest(c.password.encode(), pw.encode()):
-        if c is not None:
-            with _login_lock: FAILED_LOGINS.setdefault(key, deque()).append(now)
-        raise HTTPException(401, "Sai mật khẩu", headers={"WWW-Authenticate": "Basic"})
-    with _login_lock: FAILED_LOGINS.pop(key, None)
-    return reviewer_name(c.username)
 
 
 # every route needs the password (except PUBLIC_PATHS): a new route cannot be public by forgetting a dependency
@@ -73,28 +29,6 @@ async def security_headers(request: Request, call_next):
     resp.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
     resp.headers["X-Content-Type-Options"] = "nosniff"
     return resp
-
-
-def database_url():
-    url = os.environ.get("DATABASE_URL")
-    if not url:
-        raise HTTPException(500, "Chưa đặt DATABASE_URL trên Render")
-    return url
-
-
-@contextmanager
-def db():
-    """Read-only: every transaction starts with BEGIN READ ONLY, which also holds through Neon's connection pooler."""
-    with psycopg.connect(database_url(), connect_timeout=15) as conn:
-        conn.read_only = True
-        yield conn
-
-
-@contextmanager
-def writer():
-    """The only writes this app makes: review_proposal() and review_proposal_items()."""
-    with psycopg.connect(database_url(), autocommit=True, connect_timeout=15) as conn:
-        yield conn
 
 
 CSS = """
@@ -370,11 +304,6 @@ def counts(c):
     return E(f"{c.get('new', 0)} mới / {c.get('changed', 0)} đổi / {c.get('retired', 0)} ngừng")
 
 
-def csrf_token(pid):
-    key = (os.environ.get("APP_PASSWORD") or "").encode()
-    return hmac.new(key, f"proposal:{pid}".encode(), hashlib.sha256).hexdigest()[:32]
-
-
 def word_diff(old, new):
     a, b = re.findall(r"\S+|\s+", old or ""), re.findall(r"\S+|\s+", new or "")
     out = []
@@ -540,12 +469,6 @@ def proposal(pid: int, err: str = ""):
 
 REVIEW_ERRORS = {"name": "Đăng nhập với tên của bạn (ô tên đăng nhập) để ghi người duyệt.",
                  "db": "Không ghi được quyết định: đề xuất có thể đã được duyệt hoặc bị thay thế. Tải lại trang."}
-
-
-def same_origin(request):
-    """A form post from this site: browsers send Origin (or at least Referer) on POST, and it must name this host."""
-    src = request.headers.get("origin") or request.headers.get("referer")
-    return bool(src) and urlsplit(src).netloc == request.headers.get("host")
 
 
 @app.post("/proposals/{pid}/review")

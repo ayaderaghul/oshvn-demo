@@ -3,6 +3,7 @@ import os, threading, unittest
 from collections import Counter
 
 from support import basic, client, webapp
+from app import security
 
 
 class EveryRouteNeedsThePassword(unittest.TestCase):
@@ -32,20 +33,20 @@ class SecurityHeaders(unittest.TestCase):
 
 class Login(unittest.TestCase):
     def setUp(self):
-        webapp.FAILED_LOGINS.clear()
+        security.FAILED_LOGINS.clear()
 
     def test_repeated_wrong_passwords_are_throttled(self):
         c = client()
-        codes = [c.get("/", headers=basic(password="wrong")).status_code for _ in range(webapp.LOGIN_FAILURES_ALLOWED + 1)]
-        self.assertEqual(codes[:-1], [401] * webapp.LOGIN_FAILURES_ALLOWED)
+        codes = [c.get("/", headers=basic(password="wrong")).status_code for _ in range(security.LOGIN_FAILURES_ALLOWED + 1)]
+        self.assertEqual(codes[:-1], [401] * security.LOGIN_FAILURES_ALLOWED)
         self.assertEqual(codes[-1], 429)
 
     def test_reviewer_name_loses_invisible_characters(self):
-        self.assertEqual(webapp.reviewer_name("​chi‍ "), "chi")
-        self.assertEqual(webapp.reviewer_name("Nguyễn  Chi"), "Nguyễn Chi")
+        self.assertEqual(security.reviewer_name("​chi‍ "), "chi")
+        self.assertEqual(security.reviewer_name("Nguyễn  Chi"), "Nguyễn Chi")
         for blank in ("​‍", "ㅤ⠀", "ᅟﾠ", " 　 "):
             with self.subTest(name=repr(blank)):
-                self.assertEqual(webapp.reviewer_name(blank), "")
+                self.assertEqual(security.reviewer_name(blank), "")
 
     def test_one_client_is_one_counter_whatever_proxy_hop_it_came_through(self):
         # production, 2026-11-11: the same client reached the app with a different last X-Forwarded-For hop per
@@ -53,12 +54,12 @@ class Login(unittest.TestCase):
         c = client()
         codes = [c.get("/", headers=basic(password="wrong") | {"cf-connecting-ip": "93.41.0.110",
                                                                 "x-forwarded-for": f"93.41.0.110, 172.68.0.{i}"}).status_code
-                 for i in range(webapp.LOGIN_FAILURES_ALLOWED + 1)]
+                 for i in range(security.LOGIN_FAILURES_ALLOWED + 1)]
         self.assertEqual(codes[-1], 429)
 
     def test_a_locked_out_client_does_not_lock_out_another(self):
         c = client()
-        for i in range(webapp.LOGIN_FAILURES_ALLOWED + 1):
+        for i in range(security.LOGIN_FAILURES_ALLOWED + 1):
             c.get("/", headers=basic(password="wrong") | {"cf-connecting-ip": "93.41.0.110", "x-forwarded-for": "172.68.0.9"})
         other = {"cf-connecting-ip": "198.51.100.7", "x-forwarded-for": "172.68.0.9"}
         self.assertEqual(c.get("/", headers=basic(password="wrong") | other).status_code, 401)
@@ -68,37 +69,37 @@ class Login(unittest.TestCase):
         c = client()
         codes = [c.get("/", headers=basic(password="wrong") | {"cf-connecting-ip": "93.41.0.110",
                                                                 "x-forwarded-for": f"10.0.0.{i}"}).status_code
-                 for i in range(webapp.LOGIN_FAILURES_ALLOWED + 1)]
+                 for i in range(security.LOGIN_FAILURES_ALLOWED + 1)]
         self.assertEqual(codes[-1], 429)
 
     def test_requests_without_credentials_leave_no_trace(self):
         c = client()
         for i in range(20):
             c.get("/", headers={"cf-connecting-ip": f"192.0.2.{i}"})
-        self.assertEqual(webapp.FAILED_LOGINS, {})
+        self.assertEqual(security.FAILED_LOGINS, {})
 
     def test_a_correct_login_clears_the_failures(self):
         c = client()
-        for _ in range(webapp.LOGIN_FAILURES_ALLOWED - 1):
+        for _ in range(security.LOGIN_FAILURES_ALLOWED - 1):
             c.get("/healthz-x", headers=basic(password="wrong"))
         c.get("/healthz-x", headers=basic())
-        self.assertEqual(webapp.FAILED_LOGINS, {})
+        self.assertEqual(security.FAILED_LOGINS, {})
 
 
 class ReviewOrigin(unittest.TestCase):
     def setUp(self):
-        webapp.FAILED_LOGINS.clear()
+        security.FAILED_LOGINS.clear()
 
     def test_review_post_without_origin_or_referer_is_refused(self):
-        r = client().post("/proposals/1/review", headers=basic(), data={"token": webapp.csrf_token(1), "decision": "approved"})
+        r = client().post("/proposals/1/review", headers=basic(), data={"token": security.csrf_token(1), "decision": "approved"})
         self.assertEqual(r.status_code, 403)
 
     def test_referer_of_another_site_is_refused_and_of_this_site_is_accepted(self):
         class R:
             def __init__(self, h): self.headers = h
-        self.assertFalse(webapp.same_origin(R({"host": "app.example", "referer": "https://evil.example/x"})))
-        self.assertTrue(webapp.same_origin(R({"host": "app.example", "referer": "https://app.example/proposals/1"})))
-        self.assertFalse(webapp.same_origin(R({"host": "app.example", "origin": "null"})))
+        self.assertFalse(security.same_origin(R({"host": "app.example", "referer": "https://evil.example/x"})))
+        self.assertTrue(security.same_origin(R({"host": "app.example", "referer": "https://app.example/proposals/1"})))
+        self.assertFalse(security.same_origin(R({"host": "app.example", "origin": "null"})))
 
 
 class AgentCell(unittest.TestCase):
