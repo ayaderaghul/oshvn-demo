@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_pill, counts, agent_cell %}
+{% set active = "/proposals" %}
+{% block title %}Chờ duyệt{% endblock %}
+{% block content %}
+{% if rows is none %}
+<h1>Chờ duyệt</h1><div class='panel'>Chưa có bảng đề xuất. Chạy <code>python loader.py migrate</code>.</div>
+{% else %}
+<h1>Đề xuất chờ duyệt</h1><p class='muted'>Văn bản luật (agent00, <code>loader.py propose</code>) và nghĩa vụ (agent01). Duyệt ở đây, rồi chạy <code>python loader.py apply</code> để nạp.</p><div class='panel scroll'><table>
+<tr><th>#</th><th>Trạng thái</th><th>Văn bản</th><th>Thay đổi</th><th style='min-width:280px'>Nhận xét của agent</th><th>Ngoại lệ</th><th>Tạo</th><th>Duyệt</th></tr>
+{% for r in rows %}
+<tr><td><a href='/proposals/{{ r.id }}'>#{{ r.id }}</a></td><td>{{ status_pill(r.status) }}</td>
+<td><a href='/proposals/{{ r.id }}'><b>{{ r.doc_code }}</b></a><br><span class='muted' style='font-size:.8rem'>{{ r.file_name or '' }}</span></td>
+{% if r.kind == 'obligations' %}
+<td><b>{{ r.n_obligations }}</b> nghĩa vụ</td><td style='font-size:.85rem'><span class='pill'>agent01</span> {{ r.n_obligations }} đạt kiểm tra · {{ r.n_rejected }} bị loại · <b>{{ r.flagged or 0 }}</b> có ý không có căn cứ</td>
+{% else %}
+<td>{{ counts(r.chunks) }}</td>
+{{ agent_cell(r.verdict, r.comment, r.route) }}
+{% endif %}
+<td style='font-size:.82rem'>{% for x in r.accepted or [] %}{{ x.split(':')[0] }}{% if not loop.last %}, {% endif %}{% else %}—{% endfor %}<br><span class='muted'>{{ r.n_issues }} ghi chú parser</span></td>
+<td style='font-size:.82rem'>{{ r.created_at }}<br>{{ r.created_by or '' }}</td><td>{{ r.reviewed_by or '' }}</td></tr>
+{% else %}
+<tr><td colspan=8 class='muted'>Chưa có đề xuất nào.</td></tr>
+{% endfor %}
+</table></div>
+{% endif %}
+{% endblock %}

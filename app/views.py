@@ -1,4 +1,4 @@
-import difflib, html, re
+import difflib, html, json, re
 from pathlib import Path
 
 from fastapi.responses import HTMLResponse
@@ -45,6 +45,10 @@ def cite(text):
     return Markup(re.sub(r"\[([0-9]{1,6})\]", lambda m: f"<a href='#s{m.group(1)}'>[{m.group(1)}]</a>", E(text)))
 
 
+def dumps(x):
+    return json.dumps(x, ensure_ascii=False)
+
+
 def word_diff(old, new):
     a, b = re.findall(r"\S+|\s+", old or ""), re.findall(r"\S+|\s+", new or "")
     out = []
@@ -52,7 +56,7 @@ def word_diff(old, new):
         if tag == "equal": out.append(E("".join(a[i1:i2])))
         if tag in ("delete", "replace"): out.append(f"<del>{E(''.join(a[i1:i2]))}</del>")
         if tag in ("insert", "replace"): out.append(f"<ins>{E(''.join(b[j1:j2]))}</ins>")
-    return "".join(out)
+    return Markup("".join(out))
 
 
 VERDICT_VI = {"ok": ("có thể duyệt", "ok"), "check": ("cần xem kỹ", "no"), "reject": ("không nên nạp", "no")}

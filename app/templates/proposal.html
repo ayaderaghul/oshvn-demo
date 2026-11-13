@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_pill %}
+{% set active = "/proposals" %}
+{% block title %}Đề xuất #{{ r.id }}{% endblock %}
+{% block content %}
+{% set c = rep.chunks if rep.get('chunks') is mapping else {} %}
+<p><a href='/proposals'>← Danh sách đề xuất</a></p><div class='eyebrow'>Đề xuất #{{ r.id }}</div>
+<h1>{{ r.doc_code }} {{ status_pill(r.status) }}</h1>
+<p class='muted' style='margin:0 0 10px'>{{ r.title or '' }}</p>
+<p class='muted' style='font-size:.85rem'>File {{ r.file_name or '' }} · tạo {{ r.created_at }} bởi {{ r.created_by or '?' }} · tùy chọn: {{ options|dumps }} · {% if was_new %}lúc đề xuất: văn bản mới, chưa có trong database{% else %}lúc đề xuất: văn bản đã có, đây là bản cập nhật{% endif %}{% if exists %} · <a href='/doc/{{ exists.id }}'>xem bản hiện có trong database</a>{% endif %}</p>
+{% if err_msg %}
+<p class='err'>{{ err_msg }}</p>
+{% endif %}
+<div class='kpis' style='margin-bottom:12px'><div class='kpi'><b>{{ c.get('new', 0) }}</b>khoản mới</div>
+<div class='kpi'><b>{{ c.get('changed', 0) }}</b>đổi chữ</div><div class='kpi'><b>{{ c.get('unchanged', 0) }}</b>không đổi</div>
+<div class='kpi'><b>{{ c.get('retired', 0) }}</b>ngừng dùng</div></div>
+{% set ag = rep.get('agent') %}
+{% if ag %}
+{% set vlab, vcls = verdict_vi.get(ag.get('verdict'), ('?', '')) %}
+{% set o = ag.get('ocr') or {} %}
+<div class='panel' style='border-color:var(--accent)'><h3 style='margin-top:0'>Nhận xét của agent00 <span class='pill {{ vcls }}'>{{ vlab }}</span></h3><p>{{ ag.get('comment', '') }}</p>
+<details><summary>Các bước agent đã làm ({{ ag.get('steps', [])|length }})</summary><ol style='font-size:.88rem'>{% for x in ag.get('steps', []) %}<li>{{ x }}</li>{% endfor %}</ol></details>
+{% if o %}
+<h4>Văn bản OCR — đối chiếu với bản scan</h4><p class='muted' style='font-size:.85rem'>Những con số khác nhau giữa OCR thô và bản đã làm sạch. Mỗi dòng phải được kiểm tra trên bản scan.</p><div class='scroll'><table><tr><th>Trang</th><th>OCR thô</th><th>Sau khi làm sạch</th></tr>
+{% for x in o.get('number_changes', []) %}
+<tr><td>trang {{ x.get('page') }}</td><td><del>{{ (x.get('removed') or [])|join(', ') }}</del></td><td><ins>{{ (x.get('added') or [])|join(', ') }}</ins></td></tr>
+{% else %}
+<tr><td colspan=3 class=muted>Không có con số nào bị đổi.</td></tr>
+{% endfor %}
+</table></div>
+{% if o.get('unsure') %}
+<p style='font-size:.88rem'><b>Model không chắc:</b></p><ul style='font-size:.88rem'>{% for u in o.get('unsure') %}<li>trang {{ u.get('page') }}: {{ u.get('note', '') }}</li>{% endfor %}</ul>
+{% endif %}
+{% if o.get('low_conf') %}
+<details><summary>Từ OCR độ tin cậy thấp ({{ o.get('low_conf')|length }})</summary><p style='font-size:.85rem'>{% for w in o.get('low_conf')[:60] %}{{ w.get('word', '') }} <span class='muted'>(tr.{{ w.get('page') }})</span>{% if not loop.last %}, {% endif %}{% endfor %}</p></details>
+{% endif %}
+{% endif %}
+<p class='muted' style='font-size:.78rem;margin-bottom:0'>{{ ag.get('agent', '') }} · {{ ag.get('provider', '') }}/{{ ag.get('model', '') }} · {{ ag.get('calls', 0) }} lần gọi · {{ ag.get('tokens', 0) }} token. Nhận xét chỉ để tham khảo; kiểm tra tự động và người duyệt mới là quyết định.</p></div>
+{% endif %}
+{% set acc = rep.get('accepted') or [] %}
+<div class='panel'><h3 style='margin-top:0'>1. Kiểm tra tự động</h3><div class='scroll'><table>
+{% for ch in rep.get('checks', []) %}
+<tr><td>{% if ch['ok'] %}<span class="pill ok">ĐẠT</span>{% elif ch['name'] in acc %}<span class="pill no">LỖI · chấp nhận</span>{% else %}<span class="pill no">LỖI</span>{% endif %}</td><td>{{ ch['name'] }}</td><td style='font-size:.85rem'>{{ ch['detail'] }}</td></tr>
+{% endfor %}
+</table></div>{% if acc %}<p class='muted' style='font-size:.85rem;margin-bottom:0'>Kiểm tra được chấp nhận là ngoại lệ đã biết. Hãy chắc rằng phần chưa gán chỉ là tiêu đề, căn cứ, nơi nhận.</p>{% endif %}</div>
+{% set changes = rep.get('changes') or [] %}
+{% if changes %}
+<div class='panel'><h3 style='margin-top:0'>2. Thay đổi so với database ({{ changes|length }})</h3>
+{% for x in changes %}
+{% set k0, k1 = x['key'][0], x['key'][1] %}
+<div class='art'><b>{% if k0 in (none, 'None', '') %}Dòng dữ liệu mẫu cũ (tạo tay khi dựng pilot, không theo cấu trúc Điều/khoản){% elif (k0|string).startswith('PL') %}Phụ lục {{ (k0|string)[2:] }}, mục {{ k1 }}{% else %}Điều {{ k0 }}{% if k1 %}, khoản {{ k1 }}{% endif %}{% endif %}</b> <span class='pill'>{{ {'changed': 'đổi chữ', 'new': 'mới', 'retired': 'ngừng dùng'}.get(x.get('change'), x.get('change')|string) }}</span><p class='law' style='font-size:.92rem'>{% if x['change'] == 'changed' %}{{ word_diff(x.get('old'), x.get('new')) }}{% elif x['change'] == 'new' %}<ins>{{ x.get('new', '') }}</ins>{% else %}<del>{{ x.get('old', '') }}</del>{% endif %}</p></div>
+{% endfor %}
+</div>
+{% elif not was_new %}
+<div class='panel'><h3 style='margin-top:0'>2. Thay đổi so với database</h3><p class='muted'>Không có khoản nào đổi chữ.</p></div>
+{% endif %}
+{% set iss = rep.get('issues') or [] %}
+{% if iss %}
+<div class='panel'><details><summary>3. Ghi chú của parser ({{ iss|length }}) — chỗ nên liếc qua</summary><ul style='font-size:.88rem'>{% for i in iss %}<li>{{ i }}</li>{% endfor %}</ul></details></div>
+{% endif %}
+<div class='panel'><details{{ ' open' if was_new else '' }}><summary>4. Toàn văn đã tách ({{ by_dieu|length }} điều/phụ lục, {{ n_chunks }} khoản)</summary>
+{% for k, xs in by_dieu.items() %}
+<div class='art'><h3>{{ xs[0].get('label') or 'Điều ' ~ k }}. {{ xs[0].get('dieu_title') or '' }}</h3>
+{% for x in xs %}
+<div class='k'><b>{{ x.get('item_label') or (('Khoản ' ~ x['khoan']) if x.get('khoan') else 'Đoạn') }}</b><p class='law'>{{ x.get('text', '') }}</p></div>
+{% endfor %}
+</div>
+{% endfor %}
+</details></div>
+{% if r.status == 'pending' %}
+<div class='panel'><h3 style='margin-top:0'>5. Quyết định</h3>
+<form method='post' action='/proposals/{{ r.id }}/review'><input type='hidden' name='token' value='{{ csrf_token(r.id) }}'>
+<label>Ghi chú (tùy chọn)<br><textarea name='note' placeholder='ví dụ: đã đối chiếu số hiệu viện dẫn với bản scan'></textarea></label>
+<div class='row' style='margin-top:8px'><button name='decision' value='approved'>Duyệt — cho phép nạp</button>
+<button class='ghost' name='decision' value='rejected'>Từ chối</button></div>
+<p class='muted' style='font-size:.82rem'>Duyệt chưa ghi gì vào database. Văn bản chỉ được nạp khi chạy <code>python loader.py apply</code>.</p></form></div>
+{% else %}
+<div class='panel'><h3 style='margin-top:0'>5. Quyết định</h3><p>{{ status_vi.get(r.status, (r.status|string, ''))[0] }}{% if r.reviewed_by %} bởi <b>{{ r.reviewed_by }}</b> lúc {{ r.reviewed_at }}{% endif %}</p>
+{% if r.review_note %}<p class='law'>{{ r.review_note }}</p>{% endif %}
+{% if r.apply_report %}<p class='muted' style='font-size:.85rem'>Kết quả nạp: {{ r.apply_report|dumps }}</p>{% endif %}</div>
+{% endif %}
+{% endblock %}
