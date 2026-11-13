@@ -3,6 +3,8 @@ import os, threading, unittest
 from collections import Counter
 
 from support import basic, client, webapp
+from app import claude
+from app import rag
 from app import security
 
 
@@ -120,30 +122,30 @@ HITS = [(1.0, (1, "1/2026/NĐ-CP", {"dieu": 2, "khoan": 1}, "Điều 2 — Kho�
 
 class AnswerChecks(unittest.TestCase):
     def test_model_output_of_the_wrong_shape_is_coerced_not_a_crash(self):
-        a = webapp.parse_answer({"answer": ["x"], "used": "1", "not_found": 3})
+        a = claude.parse_answer({"answer": ["x"], "used": "1", "not_found": 3})
         self.assertEqual((a["answer"], a["used"], a["not_found"]), ("['x']", [], "3"))
-        self.assertEqual(webapp.parse_answer({"answer": "a", "used": [1, "2", "²", None, True]})["used"], [1, 2])
+        self.assertEqual(claude.parse_answer({"answer": "a", "used": [1, "2", "²", None, True]})["used"], [1, 2])
 
     def test_thousands_written_with_commas_match_dots_in_the_source(self):
-        chk = webapp.check_answer("Phạt từ 1,000,000 đồng [1].", [1], HITS)
+        chk = claude.check_answer("Phạt từ 1,000,000 đồng [1].", [1], HITS)
         self.assertEqual(chk["bad_num"], [])
 
     def test_a_number_not_in_the_cited_clause_is_reported(self):
-        self.assertEqual(webapp.check_answer("Phạt 7.000.000 đồng [1].", [1], HITS)["bad_num"], ["7.000.000"])
+        self.assertEqual(claude.check_answer("Phạt 7.000.000 đồng [1].", [1], HITS)["bad_num"], ["7.000.000"])
 
     def test_an_answer_that_cites_nothing_is_flagged(self):
-        self.assertTrue(webapp.check_answer("Có, phải thành lập.", [], HITS)["no_cite"])
+        self.assertTrue(claude.check_answer("Có, phải thành lập.", [], HITS)["no_cite"])
 
     def test_a_citation_outside_the_hits_is_reported(self):
-        self.assertEqual(webapp.check_answer("Xem [3].", [], HITS)["bad_cite"], [3])
+        self.assertEqual(claude.check_answer("Xem [3].", [], HITS)["bad_cite"], [3])
 
     def test_a_huge_citation_number_is_not_a_crash(self):
-        self.assertTrue(webapp.check_answer("Xem [" + "9" * 5000 + "].", [], HITS)["no_cite"])
-        self.assertEqual(webapp.parse_answer({"answer": "a", "used": ["9" * 5000, 10 ** 5000]})["used"], [])
+        self.assertTrue(claude.check_answer("Xem [" + "9" * 5000 + "].", [], HITS)["no_cite"])
+        self.assertEqual(claude.parse_answer({"answer": "a", "used": ["9" * 5000, 10 ** 5000]})["used"], [])
 
     def test_a_list_of_clause_numbers_is_not_a_false_alarm(self):
         hits = [(1.0, (1, "1/2026/NĐ-CP", {"dieu": 2}, "Theo khoản 5 và khoản 7 Điều 2."), "từ khóa")]
-        self.assertEqual(webapp.check_answer("Xem khoản 5,7 [1].", [1], hits)["bad_num"], [])
+        self.assertEqual(claude.check_answer("Xem khoản 5,7 [1].", [1], hits)["bad_num"], [])
 
 
 class FakeConn:
@@ -164,7 +166,7 @@ class IndexSnapshot(unittest.TestCase):
     def test_search_never_mixes_two_builds(self):
         a = [(1, "A", {"dieu": i}, f"huấn luyện an toàn {i}") for i in range(300)]
         b = [(2, "B", {"dieu": i}, "khám sức khỏe") for i in range(5)]
-        conn, idx, errors = FakeConn({0: a, 1: b}), webapp.Index(), []
+        conn, idx, errors = FakeConn({0: a, 1: b}), rag.Index(), []
         stop = threading.Event()
 
         def rebuild():

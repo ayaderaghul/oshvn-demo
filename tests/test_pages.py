@@ -5,6 +5,7 @@ from unittest import mock
 
 import support
 from support import add_document, add_proposal, basic, client, j, webapp
+from app import rag
 from app import db as dbmod
 from app import security
 
@@ -38,13 +39,13 @@ def review(pid, data, origin="http://testserver"):
 class FreshIndex(unittest.TestCase):
     def test_a_clause_changed_in_place_is_searched_with_its_new_text(self):
         with dbmod.db() as conn:
-            webapp.INDEX.ensure(conn)
+            rag.INDEX.ensure(conn)
         run = db.sql("INSERT INTO load_runs(kind, status) VALUES ('documents','applied') RETURNING id")[0][0]
         db.sql("""UPDATE chunks SET text = text || ' Kiểm định thang máy.', load_run_id=%s
                   WHERE id = (SELECT min(id) FROM chunks WHERE document_id=%s)""", (run, DOC_B))
         with dbmod.db() as conn:
-            webapp.INDEX.ensure(conn)
-        self.assertTrue(any("thang máy" in row[3] for _, row in webapp.INDEX.search("thang máy")))
+            rag.INDEX.ensure(conn)
+        self.assertTrue(any("thang máy" in row[3] for _, row in rag.INDEX.search("thang máy")))
 
 
 class AskFiltersBeforeRanking(unittest.TestCase):

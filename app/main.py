@@ -4,8 +4,7 @@ Pages: documents · one document (Điều › Khoản) · keyword search · obli
 Environment: DATABASE_URL (role oshvn_web: reads tables; its only write is the review_proposal() function),
 APP_PASSWORD (HTTP Basic; the user name is recorded as the reviewer).
 """
-import difflib, hmac, html, json, math, os, re, threading, time, unicodedata, urllib.error, urllib.request
-from collections import Counter, deque, namedtuple
+import difflib, hmac, html, json, re
 
 import psycopg
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
@@ -13,6 +12,8 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 
 from app.db import db, writer
+from app.claude import _ref, ask_claude, check_answer, parse_answer
+from app.rag import INDEX, embed_query, fuse, vector_model, vector_rows
 from app.security import auth, csrf_token, same_origin
 
 E = html.escape
@@ -616,212 +617,6 @@ và được đánh dấu là đã được bạn duyệt — lần chạy agent
     if lg:
         out.append(f"<div class='panel'><details><summary>Nhật ký agent01 ({len(lg)} điều)</summary><ul style='font-size:.85rem'>" + "".join(f"<li>{E(x)}</li>" for x in lg) + "</ul></details></div>")
     return page(f"Đề xuất #{pid}", "".join(out), "/proposals")
-
-
-# ---------------------------------------------------------------- Hỏi đáp (RAG): BM25 over all clauses + Claude answer with citations
-# Same retrieval as the tra cứu page: accent-insensitive, syllable unigrams + bigrams, BM25 (19/20 on the NĐ 39 question set).
-STOP = set("cac cua va la co cho duoc trong theo tai voi nhung mot khi thi de ve tu den nay do sau day phai ai gi nao the bao nhieu khong".split())
-
-
-def _norm(t):
-    t = unicodedata.normalize("NFD", t.lower().replace("đ", "d"))
-    return "".join(ch for ch in t if unicodedata.category(ch) != "Mn")
-
-
-def _tokens(t):
-    w = re.findall(r"[a-z0-9]+", _norm(t))
-    return [x for x in w if x not in STOP] + [a + "_" + b for a, b in zip(w, w[1:])]
-
-
-Snapshot = namedtuple("Snapshot", "stamp rows tf lens avg idf")
-# load_run_id moves on every in-place text change and every retire / revive, which count and max(id) do not see
-STAMP_SQL = "SELECT count(*), max(id), max(load_run_id) FROM chunks WHERE source_kind='legal_article' AND NOT coalesce(retired,false)"
-
-
-class Index:
-    """In-memory BM25 over every live clause. Rebuilt when the database changes. A search reads one immutable
-    snapshot, so a rebuild running at the same time can never mix two builds."""
-    def __init__(self):
-        self.lock, self.snap = threading.Lock(), Snapshot(None, [], [], [], 1, {})
-
-    def ensure(self, conn):
-        if tuple(conn.execute(STAMP_SQL).fetchone()) == self.snap.stamp: return
-        with self.lock:
-            stamp = tuple(conn.execute(STAMP_SQL).fetchone())
-            if stamp == self.snap.stamp: return   # another request rebuilt it while this one waited
-            rows = conn.execute("""SELECT d.id, d.number, c.locator, c.text FROM chunks c JOIN legal_documents d ON d.id=c.document_id
-                                   WHERE c.source_kind='legal_article' AND NOT coalesce(c.retired,false)""").fetchall()
-            tf = [Counter(_tokens(r[3])) for r in rows]
-            lens = [sum(t.values()) for t in tf]
-            df = Counter(t for x in tf for t in x); N = len(rows)
-            self.snap = Snapshot(stamp, rows, tf, lens, (sum(lens) / len(lens)) if rows else 1,
-                                 {t: math.log(1 + (N - n + .5) / (n + .5)) for t, n in df.items()})
-
-    def search(self, q, k=12, doc="", k1=1.2, b=0.75):
-        s, qt, sc = self.snap, set(_tokens(q)), []
-        for i, tf in enumerate(s.tf):
-            if doc and s.rows[i][1] != doc: continue   # filter before ranking: a small document is not crowded out
-            v = sum(s.idf[t] * tf[t] * (k1 + 1) / (tf[t] + k1 * (1 - b + b * s.lens[i] / s.avg)) for t in qt if t in tf)
-            if v > 0: sc.append((v, i))
-        return [(v, s.rows[i]) for v, i in sorted(sc, reverse=True)[:k]]
-
-
-INDEX = Index()
-
-
-def vector_model(conn):
-    """(model, None) when the clauses have Voyage vectors and VOYAGE_API_KEY is set, else (None, why not)."""
-    models = [r[0] for r in conn.execute("SELECT DISTINCT embedding_model FROM chunks WHERE embedding IS NOT NULL").fetchall()]
-    if not models:
-        return None, "chưa có vector (chạy loader.py embed) — chỉ tìm theo từ khóa"
-    if len(models) > 1 or not str(models[0]).startswith("voyage:"):
-        return None, f"vector trong database là {models}, trang này chỉ dùng vector Voyage — chỉ tìm theo từ khóa"
-    if not os.environ.get("VOYAGE_API_KEY"):
-        return None, "chưa đặt VOYAGE_API_KEY trên Render — chỉ tìm theo từ khóa"
-    return models[0].split(":", 1)[1], None
-
-
-def embed_query(q, model):
-    """The question embedded with the SAME model that embedded the clauses. Called with no database connection open."""
-    body = json.dumps({"input": [q], "model": model, "input_type": "query", "output_dimension": 1024}).encode()
-    req = urllib.request.Request(os.environ.get("VOYAGE_API_BASE", "https://api.voyageai.com") + "/v1/embeddings", body,
-                                 {"Authorization": f"Bearer {os.environ.get('VOYAGE_API_KEY')}", "Content-Type": "application/json"})
-    try:
-        return json.load(urllib.request.urlopen(req, timeout=15))["data"][0]["embedding"], None
-    except Exception as e:
-        return None, f"Voyage API lỗi ({str(e)[:120]}) — chỉ tìm theo từ khóa"
-
-
-def vector_rows(conn, vec, model, doc="", k=30):
-    try:
-        rows = conn.execute("""SELECT d.id, d.number, c.locator, c.text, 1 - (c.embedding <=> %s::vector) AS sim
-                               FROM chunks c JOIN legal_documents d ON d.id=c.document_id
-                               WHERE c.source_kind='legal_article' AND NOT coalesce(c.retired,false) AND c.embedding IS NOT NULL
-                                 AND (%s = '' OR d.number = %s)
-                               ORDER BY c.embedding <=> %s::vector LIMIT %s""",
-                            ("[" + ",".join(f"{x:.6f}" for x in vec) + "]", doc, doc) + ("[" + ",".join(f"{x:.6f}" for x in vec) + "]", k)).fetchall()
-    except (psycopg.Error, TypeError, ValueError) as e:
-        conn.rollback()
-        return [], f"tìm theo nghĩa lỗi ({str(e)[:120]}) — chỉ tìm theo từ khóa"
-    return rows, f"từ khóa (BM25) + theo nghĩa ({model})"
-
-
-def fuse(bm25_hits, vec_rows, k=12):
-    """Reciprocal rank fusion: a clause ranked high by either method comes first; found by both counts most."""
-    score, row, how = {}, {}, {}
-    for rank, (_, r) in enumerate(bm25_hits):
-        key = (r[1], json.dumps(r[2], sort_keys=True)); score[key] = score.get(key, 0) + 1 / (60 + rank); row[key] = r; how.setdefault(key, set()).add("từ khóa")
-    for rank, r in enumerate(vec_rows):
-        key = (r[1], json.dumps(r[2], sort_keys=True)); score[key] = score.get(key, 0) + 1 / (60 + rank); row.setdefault(key, r[:4]); how.setdefault(key, set()).add("theo nghĩa")
-    best = sorted(score, key=lambda x: -score[x])[:k]
-    return [(score[x] * 1000, row[x], " + ".join(sorted(how[x]))) for x in best]
-ASK_LOG, ASK_LOCK = deque(), threading.Lock()   # times of model calls in this process, for the hourly limit
-
-
-def ask_limit():
-    try:
-        return max(0, int(os.environ.get("ASK_LIMIT_PER_HOUR", "60")))
-    except ValueError:
-        return 60
-
-
-def reserve_ask():
-    """Take one slot of the hourly limit, atomically. Returns the slot, or None when the limit is reached."""
-    now = time.time()
-    with ASK_LOCK:
-        while ASK_LOG and now - ASK_LOG[0] > 3600: ASK_LOG.popleft()
-        if len(ASK_LOG) >= ask_limit(): return None
-        ASK_LOG.append(now)
-        return now
-
-
-def release_ask(slot):
-    """A call that failed does not count against the limit."""
-    with ASK_LOCK:
-        try: ASK_LOG.remove(slot)
-        except ValueError: pass
-
-
-def _ref(loc, num):
-    return f"{num} " + (loc.get("ref") or (loc.get("label") or f"Điều {loc.get('dieu')}") + (f", khoản {loc['khoan']}" if loc.get("khoan") else ""))
-
-
-def _numbers(t):
-    return re.findall(r"\d+(?:[/.,]\d+)*", t)
-
-
-def _same_number(n):
-    """1.000.000, 1,000,000 and 1000000 are one number; 1,5 and 1.5 are one number."""
-    if re.fullmatch(r"\d{1,3}(?:([.,])\d{3})(?:\1\d{3})*", n):
-        return re.sub(r"[.,]", "", n)
-    return n.replace(",", ".")
-
-
-def _small_int(x):
-    if isinstance(x, bool): return None
-    if isinstance(x, int): return x if abs(x) < 10**6 else None
-    if isinstance(x, str) and x.strip().isascii() and x.strip().isdigit() and len(x.strip()) <= 6: return int(x.strip())
-    return None
-
-
-def parse_answer(out):
-    """The model's JSON, coerced to {answer: str, used: [int], not_found: str} whatever it returned."""
-    out = out if isinstance(out, dict) else {}
-    text = lambda x: "" if x is None else x if isinstance(x, str) else str(x)
-    used = out.get("used") if isinstance(out.get("used"), list) else []
-    return {"answer": text(out.get("answer")), "used": [n for n in map(_small_int, used) if n is not None],
-            "not_found": text(out.get("not_found")), "_usage": out.get("_usage", ("", 0, 0))}
-
-
-def check_answer(answer, used, hits):
-    """Citations outside the hits, numbers not in a cited clause, and an answer that cites nothing at all."""
-    cited = {int(x) for x in re.findall(r"\[([0-9]{1,6})\]", answer)} | set(used)
-    bad_cite = sorted(c for c in cited if c < 1 or c > len(hits))
-    src = {_same_number(n) for c in cited if 1 <= c <= len(hits)
-           for n in _numbers(hits[c - 1][1][3] + " " + _ref(hits[c - 1][1][2], hits[c - 1][1][1]))}   # text + its own reference
-    plain = re.sub(r"\[[0-9]+\]", " ", answer)          # citation marks are not numbers to check
-    bad_num = sorted({n for n in _numbers(plain) if _same_number(n) not in src
-                      and not all(_same_number(p) in src for p in re.split(r"[,;]", n))})   # "5,7" may be a list
-    return {"bad_cite": bad_cite, "bad_num": bad_num, "no_cite": not cited}
-
-
-def ask_claude(question, hits):
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if not key: return None, "Chưa đặt ANTHROPIC_API_KEY trên Render — chỉ hiện các khoản tìm được, chưa có câu trả lời."
-    slot = reserve_ask()
-    if slot is None:
-        return None, f"Đã đủ {ask_limit()} câu hỏi trong một giờ (giới hạn ASK_LIMIT_PER_HOUR). Thử lại sau."
-    sources = "\n\n".join(f"[{i + 1}] {_ref(h[1][2], h[1][1])}\n{h[1][3][:2500]}" for i, h in enumerate(hits))
-    user = (f"Câu hỏi của chuyên gia an toàn, vệ sinh lao động:\n{question}\n\nCác khoản luật tìm được (đánh số):\n{sources}\n\n"
-            "Trả lời bằng tiếng Việt, ngắn gọn, CHỈ dựa vào các khoản trên. Sau mỗi ý ghi số khoản làm căn cứ, ví dụ [2] hoặc [1][4]. "
-            "Mọi con số (thời hạn, số người, mức phạt) phải chép đúng từ khoản được dẫn. Nếu các khoản trên không đủ để trả lời, nói rõ "
-            "phần nào không tìm thấy căn cứ, không đoán. Lưu ý: mức phạt trong NĐ 283/2026 là mức cho cá nhân; tổ chức bị phạt gấp 2 lần, "
-            "trừ khi điều đó ghi rõ là tổ chức.\n"
-            'Trả JSON: {"answer": "...", "used": [số các khoản đã dẫn], "not_found": "phần không có căn cứ, hoặc rỗng"}')
-    model = os.environ.get("ASK_MODEL", "claude-sonnet-5-5")
-    body = {"model": model, "max_tokens": 2500, "system": "Bạn là trợ lý tra cứu pháp luật ATVSLĐ của OSHVN. Chỉ trả lời bằng một đối tượng JSON.",
-            "messages": [{"role": "user", "content": user}]}
-    base = os.environ.get("ASK_API_BASE", "https://api.anthropic.com")
-    req = urllib.request.Request(base + "/v1/messages", json.dumps(body).encode(),
-                                 {"Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01"})
-    try:
-        data = json.load(urllib.request.urlopen(req, timeout=60))
-    except urllib.error.HTTPError as e:
-        release_ask(slot)
-        return None, f"Claude API báo lỗi {e.code}: {e.read().decode('utf-8', 'replace')[:300]}"
-    except Exception as e:
-        release_ask(slot)
-        return None, f"Không gọi được Claude API: {e}"
-    text = "".join(b.get("text", "") for b in data.get("content", []) if isinstance(b, dict) and b.get("type") == "text")
-    m = re.search(r"\{.*\}", text, re.S)
-    try:
-        out = json.loads(m.group(0) if m else text)
-    except json.JSONDecodeError:
-        return None, "Câu trả lời của model không đúng định dạng — thử lại."
-    if not isinstance(out, dict):
-        return None, "Câu trả lời của model không đúng định dạng — thử lại."
-    u = data.get("usage", {}); out["_usage"] = (model, u.get("input_tokens", 0), u.get("output_tokens", 0))
-    return out, None
 
 
 def ask_form(q="", doc="", docs=()):
