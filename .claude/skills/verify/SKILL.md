@@ -45,6 +45,16 @@ The fake Claude answers "Theo [1]: …" with the first line of clause 1. When th
 
 The feature map in `features/` has one recipe per feature. Read `features/README.md` first.
 
+## Observe (traces and heap)
+
+`.venv/Scripts/python .claude/skills/verify/scripts/observe.py` starts its own run, serves the app inside the script so its Python heap is visible, drives a fixed load, and stops the run. The load is two rounds of every page, 100 questions, and two phases of wrong passwords from distinct addresses (`--bad-logins N`, default 11000). Allow about five minutes. It writes `verify_out/<run>/observe/`:
+
+- `trace.json`: one span per request, with its database connects, queries, template renders, and model calls nested under it. Open it at https://ui.perfetto.dev. The file stays in the browser.
+- `heap-A…D.snapshot`: `tracemalloc` snapshots after warm-up, after normal use, and after each wrong-password phase. Compare two with `tracemalloc.Snapshot.load(...).compare_to(other, "lineno")`.
+- `report.txt`: latency, connections, and queries per route; the share spent connecting, querying, rendering, and calling models; heap totals; and growth by source line.
+
+Read it this way. Heap from A to B must stay flat, because normal use keeps no state per request. From C to D it must stay flat as well, because `FAILED_LOGINS` is capped at `LOGIN_TRACKED_MAX`. Times come from a local database, so connection cost on Neon is higher.
+
 ## Evidence
 
 Each command saves to `verify_out/<run>/` (gitignored): `NNN-<slug>.html` (the page as served), `NNN-<slug>.txt` (status line, redirect target, and the page text), and `model-calls.jsonl`, `app.log`, `fake.log`. Proof standards:
