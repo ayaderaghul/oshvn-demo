@@ -10,7 +10,6 @@ from fastapi.responses import PlainTextResponse
 from app.routers import ask, documents, obligations, proposals, runs
 from app.security import auth
 
-
 # every route needs the password (except PUBLIC_PATHS): a new route cannot be public by forgetting a dependency
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, dependencies=[Depends(auth)])
 

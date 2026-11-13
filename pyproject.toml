@@ -1,0 +1,24 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 140
+extend-exclude = [".claude", "verify_out"]
+
+[tool.ruff.lint]
+select = ["E9", "F", "B", "S", "I", "TID251"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Form"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"psycopg.connect".msg = "Open connections with app.db.db() (reads) or app.db.writer() (the review functions)."
+"fastapi.staticfiles.StaticFiles".msg = "A mounted app skips the app-wide auth dependency, so its files would be public. Inline the asset or serve it from an authenticated route."
+"starlette.staticfiles.StaticFiles".msg = "A mounted app skips the app-wide auth dependency, so its files would be public. Inline the asset or serve it from an authenticated route."
+
+[tool.ruff.lint.per-file-ignores]
+"app/db.py" = ["TID251"]
+# the Claude and Voyage base URLs come from operator-set env vars, not from requests
+"app/claude.py" = ["S310"]
+"app/rag.py" = ["S310"]
+"app/views.py" = ["S704"]
+"app/templating.py" = ["S704"]
+"tests/**" = ["S", "TID251"]

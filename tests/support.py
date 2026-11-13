@@ -1,5 +1,13 @@
 """A throwaway Postgres (Docker, pgvector) with tests/fixtures/schema.sql, and a TestClient logged in to the app."""
-import base64, json, os, socket, subprocess, sys, time, unittest, uuid
+import base64
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import unittest
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,8 +17,9 @@ os.environ["APP_PASSWORD"] = PASSWORD
 os.environ.pop("ANTHROPIC_API_KEY", None)
 os.environ.pop("VOYAGE_API_KEY", None)
 
-from app import main  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+
+from app import main  # noqa: E402
 
 
 def basic(user="chi", password=PASSWORD):

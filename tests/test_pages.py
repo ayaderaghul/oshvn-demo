@@ -1,11 +1,15 @@
 """Pages and the review form against a real Postgres seeded with the rows that trigger each review finding."""
-import json, threading, unittest
+import json
+import threading
+import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
 
 import support
 from support import add_document, add_proposal, basic, client, j
-from app import db as dbmod, rag, security
+
+from app import db as dbmod
+from app import rag, security
 from app.routers import ask as ask_router
 
 BAD = "<img src=x onerror=alert(1)>"

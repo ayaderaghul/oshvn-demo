@@ -1,8 +1,9 @@
 """Checks that need no database: authentication, security headers, CSRF origin, pure helpers."""
-import os, threading, unittest
-from collections import Counter
+import threading
+import unittest
 
 from support import basic, client
+
 from app import claude, main, rag, rules, security
 from app.templating import templates
 
@@ -60,7 +61,7 @@ class Login(unittest.TestCase):
 
     def test_a_locked_out_client_does_not_lock_out_another(self):
         c = client()
-        for i in range(security.LOGIN_FAILURES_ALLOWED + 1):
+        for _ in range(security.LOGIN_FAILURES_ALLOWED + 1):
             c.get("/", headers=basic(password="wrong") | {"cf-connecting-ip": "93.41.0.110", "x-forwarded-for": "172.68.0.9"})
         other = {"cf-connecting-ip": "198.51.100.7", "x-forwarded-for": "172.68.0.9"}
         self.assertEqual(c.get("/", headers=basic(password="wrong") | other).status_code, 401)

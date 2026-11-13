@@ -1,4 +1,11 @@
-import json, math, os, re, threading, unicodedata, urllib.request
+import itertools
+import json
+import math
+import os
+import re
+import threading
+import unicodedata
+import urllib.request
 from collections import Counter, namedtuple
 
 import psycopg
@@ -15,7 +22,7 @@ def _norm(t):
 
 def _tokens(t):
     w = re.findall(r"[a-z0-9]+", _norm(t))
-    return [x for x in w if x not in STOP] + [a + "_" + b for a, b in zip(w, w[1:])]
+    return [x for x in w if x not in STOP] + [a + "_" + b for a, b in itertools.pairwise(w)]
 
 
 Snapshot = namedtuple("Snapshot", "stamp rows tf lens avg idf")

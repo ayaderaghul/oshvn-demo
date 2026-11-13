@@ -1,4 +1,5 @@
-import hmac, json
+import hmac
+import json
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request

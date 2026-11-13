@@ -1,4 +1,7 @@
-import difflib, html, json, re
+import difflib
+import html
+import json
+import re
 
 from markupsafe import Markup
 

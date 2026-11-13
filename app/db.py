@@ -2,8 +2,8 @@ import os
 from contextlib import contextmanager
 
 import psycopg
-from psycopg.rows import namedtuple_row
 from fastapi import HTTPException
+from psycopg.rows import namedtuple_row
 
 
 def database_url():

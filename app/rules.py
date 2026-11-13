@@ -1,4 +1,5 @@
-import json, re
+import json
+import re
 
 FIELDS = [("sector", "Ngành", "select"), ("n", "Số lao động", "number"), ("role", "Vai trò trong dự án", "role"),
           ("strict", "Có thiết bị nghiêm ngặt", "bool"), ("hazardous", "Có việc nặng nhọc, độc hại", "bool"),
