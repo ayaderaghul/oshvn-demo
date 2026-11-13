@@ -1,6 +1,8 @@
 """Checks that need no database: authentication, security headers, CSRF origin, pure helpers."""
 import threading
+import time
 import unittest
+from unittest import mock
 
 from support import basic, client
 
@@ -36,6 +38,7 @@ class SecurityHeaders(unittest.TestCase):
 class Login(unittest.TestCase):
     def setUp(self):
         security.FAILED_LOGINS.clear()
+        security._last_sweep[0] = 0.0
 
     def test_repeated_wrong_passwords_are_throttled(self):
         c = client()
@@ -79,6 +82,24 @@ class Login(unittest.TestCase):
         for i in range(20):
             c.get("/", headers={"cf-connecting-ip": f"192.0.2.{i}"})
         self.assertEqual(security.FAILED_LOGINS, {})
+
+    def test_clients_that_stopped_guessing_are_forgotten(self):
+        # 2026-11-13 heap snapshot: every address that sent one wrong password stayed in memory until a restart
+        c = client()
+        for i in range(50):
+            c.get("/", headers=basic(password="wrong") | {"cf-connecting-ip": f"192.0.2.{i}"})
+        later = time.time() + security.LOGIN_WINDOW + 61
+        with mock.patch.object(security.time, "time", return_value=later):
+            c.get("/", headers=basic(password="wrong") | {"cf-connecting-ip": "198.51.100.7"})
+        self.assertEqual(list(security.FAILED_LOGINS), ["198.51.100.7"])
+
+    def test_the_failure_table_has_a_size_limit(self):
+        c = client()
+        with mock.patch.object(security, "LOGIN_TRACKED_MAX", 100):
+            for i in range(300):
+                c.get("/", headers=basic(password="wrong") | {"cf-connecting-ip": f"10.0.{i // 256}.{i % 256}"})
+            self.assertEqual(len(security.FAILED_LOGINS), 100)
+            self.assertIn("10.0.1.43", security.FAILED_LOGINS)
 
     def test_a_correct_login_clears_the_failures(self):
         c = client()
