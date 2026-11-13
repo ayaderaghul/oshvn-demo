@@ -1,14 +1,17 @@
 """Checks that need no database: authentication, security headers, CSRF origin, pure helpers."""
-import os, threading, unittest
-from collections import Counter
+import threading
+import unittest
 
-from support import basic, client, webapp
+from support import basic, client
+
+from app import claude, main, rag, rules, security
+from app.templating import templates
 
 
 class EveryRouteNeedsThePassword(unittest.TestCase):
     def test_all_routes_but_healthz_answer_401_without_credentials(self):
         c = client()
-        for route in webapp.app.routes:
+        for route in main.app.routes:
             path = getattr(route, "path", "")
             if not path or path == "/healthz":
                 continue
@@ -32,20 +35,20 @@ class SecurityHeaders(unittest.TestCase):
 
 class Login(unittest.TestCase):
     def setUp(self):
-        webapp.FAILED_LOGINS.clear()
+        security.FAILED_LOGINS.clear()
 
     def test_repeated_wrong_passwords_are_throttled(self):
         c = client()
-        codes = [c.get("/", headers=basic(password="wrong")).status_code for _ in range(webapp.LOGIN_FAILURES_ALLOWED + 1)]
-        self.assertEqual(codes[:-1], [401] * webapp.LOGIN_FAILURES_ALLOWED)
+        codes = [c.get("/", headers=basic(password="wrong")).status_code for _ in range(security.LOGIN_FAILURES_ALLOWED + 1)]
+        self.assertEqual(codes[:-1], [401] * security.LOGIN_FAILURES_ALLOWED)
         self.assertEqual(codes[-1], 429)
 
     def test_reviewer_name_loses_invisible_characters(self):
-        self.assertEqual(webapp.reviewer_name("​chi‍ "), "chi")
-        self.assertEqual(webapp.reviewer_name("Nguyễn  Chi"), "Nguyễn Chi")
+        self.assertEqual(security.reviewer_name("​chi‍ "), "chi")
+        self.assertEqual(security.reviewer_name("Nguyễn  Chi"), "Nguyễn Chi")
         for blank in ("​‍", "ㅤ⠀", "ᅟﾠ", " 　 "):
             with self.subTest(name=repr(blank)):
-                self.assertEqual(webapp.reviewer_name(blank), "")
+                self.assertEqual(security.reviewer_name(blank), "")
 
     def test_one_client_is_one_counter_whatever_proxy_hop_it_came_through(self):
         # production, 2026-11-11: the same client reached the app with a different last X-Forwarded-For hop per
@@ -53,12 +56,12 @@ class Login(unittest.TestCase):
         c = client()
         codes = [c.get("/", headers=basic(password="wrong") | {"cf-connecting-ip": "93.41.0.110",
                                                                 "x-forwarded-for": f"93.41.0.110, 172.68.0.{i}"}).status_code
-                 for i in range(webapp.LOGIN_FAILURES_ALLOWED + 1)]
+                 for i in range(security.LOGIN_FAILURES_ALLOWED + 1)]
         self.assertEqual(codes[-1], 429)
 
     def test_a_locked_out_client_does_not_lock_out_another(self):
         c = client()
-        for i in range(webapp.LOGIN_FAILURES_ALLOWED + 1):
+        for _ in range(security.LOGIN_FAILURES_ALLOWED + 1):
             c.get("/", headers=basic(password="wrong") | {"cf-connecting-ip": "93.41.0.110", "x-forwarded-for": "172.68.0.9"})
         other = {"cf-connecting-ip": "198.51.100.7", "x-forwarded-for": "172.68.0.9"}
         self.assertEqual(c.get("/", headers=basic(password="wrong") | other).status_code, 401)
@@ -68,50 +71,54 @@ class Login(unittest.TestCase):
         c = client()
         codes = [c.get("/", headers=basic(password="wrong") | {"cf-connecting-ip": "93.41.0.110",
                                                                 "x-forwarded-for": f"10.0.0.{i}"}).status_code
-                 for i in range(webapp.LOGIN_FAILURES_ALLOWED + 1)]
+                 for i in range(security.LOGIN_FAILURES_ALLOWED + 1)]
         self.assertEqual(codes[-1], 429)
 
     def test_requests_without_credentials_leave_no_trace(self):
         c = client()
         for i in range(20):
             c.get("/", headers={"cf-connecting-ip": f"192.0.2.{i}"})
-        self.assertEqual(webapp.FAILED_LOGINS, {})
+        self.assertEqual(security.FAILED_LOGINS, {})
 
     def test_a_correct_login_clears_the_failures(self):
         c = client()
-        for _ in range(webapp.LOGIN_FAILURES_ALLOWED - 1):
+        for _ in range(security.LOGIN_FAILURES_ALLOWED - 1):
             c.get("/healthz-x", headers=basic(password="wrong"))
         c.get("/healthz-x", headers=basic())
-        self.assertEqual(webapp.FAILED_LOGINS, {})
+        self.assertEqual(security.FAILED_LOGINS, {})
 
 
 class ReviewOrigin(unittest.TestCase):
     def setUp(self):
-        webapp.FAILED_LOGINS.clear()
+        security.FAILED_LOGINS.clear()
 
     def test_review_post_without_origin_or_referer_is_refused(self):
-        r = client().post("/proposals/1/review", headers=basic(), data={"token": webapp.csrf_token(1), "decision": "approved"})
+        r = client().post("/proposals/1/review", headers=basic(), data={"token": security.csrf_token(1), "decision": "approved"})
         self.assertEqual(r.status_code, 403)
 
     def test_referer_of_another_site_is_refused_and_of_this_site_is_accepted(self):
         class R:
             def __init__(self, h): self.headers = h
-        self.assertFalse(webapp.same_origin(R({"host": "app.example", "referer": "https://evil.example/x"})))
-        self.assertTrue(webapp.same_origin(R({"host": "app.example", "referer": "https://app.example/proposals/1"})))
-        self.assertFalse(webapp.same_origin(R({"host": "app.example", "origin": "null"})))
+        self.assertFalse(security.same_origin(R({"host": "app.example", "referer": "https://evil.example/x"})))
+        self.assertTrue(security.same_origin(R({"host": "app.example", "referer": "https://app.example/proposals/1"})))
+        self.assertFalse(security.same_origin(R({"host": "app.example", "origin": "null"})))
 
 
 class AgentCell(unittest.TestCase):
+    def render(self, *args):
+        return str(templates.env.get_template("_macros.html").module.agent_cell(*args))
+
     def test_an_unknown_verdict_is_not_written_into_the_page(self):
-        self.assertNotIn("<img", webapp.agent_cell("<img src=x onerror=1>", "c", "parse"))
+        self.assertNotIn("<img", self.render("<img src=x onerror=1>", "c", "parse"))
+        self.assertNotIn("<img", self.render("ok", "<img src=x onerror=1>", "<b>x</b>"))
 
 
 class Nice(unittest.TestCase):
     def test_words_inside_other_words_are_left_alone(self):
-        self.assertEqual(webapp.nice("trueness falsely needsy"), "trueness falsely needsy")
+        self.assertEqual(rules.nice("trueness falsely needsy"), "trueness falsely needsy")
 
     def test_whole_words_are_translated(self):
-        self.assertEqual(webapp.nice("strict = true"), "Có thiết bị nghiêm ngặt = có")
+        self.assertEqual(rules.nice("strict = true"), "Có thiết bị nghiêm ngặt = có")
 
 
 HITS = [(1.0, (1, "1/2026/NĐ-CP", {"dieu": 2, "khoan": 1}, "Điều 2 — Khoản 1\nPhạt tiền từ 1.000.000 đồng đến 5.000.000 đồng."), "từ khóa")]
@@ -119,30 +126,30 @@ HITS = [(1.0, (1, "1/2026/NĐ-CP", {"dieu": 2, "khoan": 1}, "Điều 2 — Kho�
 
 class AnswerChecks(unittest.TestCase):
     def test_model_output_of_the_wrong_shape_is_coerced_not_a_crash(self):
-        a = webapp.parse_answer({"answer": ["x"], "used": "1", "not_found": 3})
+        a = claude.parse_answer({"answer": ["x"], "used": "1", "not_found": 3})
         self.assertEqual((a["answer"], a["used"], a["not_found"]), ("['x']", [], "3"))
-        self.assertEqual(webapp.parse_answer({"answer": "a", "used": [1, "2", "²", None, True]})["used"], [1, 2])
+        self.assertEqual(claude.parse_answer({"answer": "a", "used": [1, "2", "²", None, True]})["used"], [1, 2])
 
     def test_thousands_written_with_commas_match_dots_in_the_source(self):
-        chk = webapp.check_answer("Phạt từ 1,000,000 đồng [1].", [1], HITS)
+        chk = claude.check_answer("Phạt từ 1,000,000 đồng [1].", [1], HITS)
         self.assertEqual(chk["bad_num"], [])
 
     def test_a_number_not_in_the_cited_clause_is_reported(self):
-        self.assertEqual(webapp.check_answer("Phạt 7.000.000 đồng [1].", [1], HITS)["bad_num"], ["7.000.000"])
+        self.assertEqual(claude.check_answer("Phạt 7.000.000 đồng [1].", [1], HITS)["bad_num"], ["7.000.000"])
 
     def test_an_answer_that_cites_nothing_is_flagged(self):
-        self.assertTrue(webapp.check_answer("Có, phải thành lập.", [], HITS)["no_cite"])
+        self.assertTrue(claude.check_answer("Có, phải thành lập.", [], HITS)["no_cite"])
 
     def test_a_citation_outside_the_hits_is_reported(self):
-        self.assertEqual(webapp.check_answer("Xem [3].", [], HITS)["bad_cite"], [3])
+        self.assertEqual(claude.check_answer("Xem [3].", [], HITS)["bad_cite"], [3])
 
     def test_a_huge_citation_number_is_not_a_crash(self):
-        self.assertTrue(webapp.check_answer("Xem [" + "9" * 5000 + "].", [], HITS)["no_cite"])
-        self.assertEqual(webapp.parse_answer({"answer": "a", "used": ["9" * 5000, 10 ** 5000]})["used"], [])
+        self.assertTrue(claude.check_answer("Xem [" + "9" * 5000 + "].", [], HITS)["no_cite"])
+        self.assertEqual(claude.parse_answer({"answer": "a", "used": ["9" * 5000, 10 ** 5000]})["used"], [])
 
     def test_a_list_of_clause_numbers_is_not_a_false_alarm(self):
         hits = [(1.0, (1, "1/2026/NĐ-CP", {"dieu": 2}, "Theo khoản 5 và khoản 7 Điều 2."), "từ khóa")]
-        self.assertEqual(webapp.check_answer("Xem khoản 5,7 [1].", [1], hits)["bad_num"], [])
+        self.assertEqual(claude.check_answer("Xem khoản 5,7 [1].", [1], hits)["bad_num"], [])
 
 
 class FakeConn:
@@ -163,7 +170,7 @@ class IndexSnapshot(unittest.TestCase):
     def test_search_never_mixes_two_builds(self):
         a = [(1, "A", {"dieu": i}, f"huấn luyện an toàn {i}") for i in range(300)]
         b = [(2, "B", {"dieu": i}, "khám sức khỏe") for i in range(5)]
-        conn, idx, errors = FakeConn({0: a, 1: b}), webapp.Index(), []
+        conn, idx, errors = FakeConn({0: a, 1: b}), rag.Index(), []
         stop = threading.Event()
 
         def rebuild():

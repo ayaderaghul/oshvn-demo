@@ -223,7 +223,7 @@ def cmd_up(a):
     env = {**os.environ, "DATABASE_URL": st["db_url"], "APP_PASSWORD": st["password"],
            "ANTHROPIC_API_KEY": "verify-fake", "ASK_API_BASE": f"http://127.0.0.1:{fake_port}",
            "VOYAGE_API_KEY": "verify-fake", "VOYAGE_API_BASE": f"http://127.0.0.1:{fake_port}", "PYTHONIOENCODING": "utf-8"}
-    st["pids"]["app"] = spawn([str(VENV_PY), "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", str(app_port)], d / "app.log", env)
+    st["pids"]["app"] = spawn([str(VENV_PY), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(app_port)], d / "app.log", env)
     (d / "state.json").write_text(json.dumps(st, indent=1), encoding="utf-8")
     wait_for(lambda: DIRECT.open(f"http://127.0.0.1:{fake_port}/", timeout=2).status == 200, "fake model server")
     # ready means usable: the logged-in home page lists the seeded document, not just that /healthz answers

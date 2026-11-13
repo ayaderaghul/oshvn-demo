@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% set active = "/" %}
+{% block title %}Văn bản{% endblock %}
+{% block content %}
+<h1>Văn bản trong database</h1><div class='kpis' style='margin:10px 0 14px'><div class='kpi'><b>{{ rows|length }}</b>văn bản</div><div class='kpi'><b>{{ '{:,}'.format(tot.dieu) }}</b>điều</div>
+<div class='kpi'><b>{{ '{:,}'.format(tot.n - tot.pl) }}</b>khoản và đoạn</div><div class='kpi'><b>{{ '{:,}'.format(tot.pl) }}</b>mục phụ lục</div></div>
+<p class='muted' style='font-size:.82rem;margin-top:-6px'>Khoản và đoạn: mỗi khoản, cộng đoạn mở đầu của Điều; Điều không chia khoản tính là một đoạn.</p>
+<div class='panel scroll'><table><tr><th>Số hiệu</th><th>Loại</th><th>Tên</th><th>Điều</th><th>Khoản và đoạn</th><th>Mục phụ lục</th><th>Vector</th><th>Nguồn</th></tr>
+{% for r in rows %}
+<tr><td>{% if r.n %}<a href='/doc/{{ r.id }}'>{{ r.number }}</a>{% else %}{{ r.number }}{% endif %}</td><td>{{ r.type or '' }}</td><td>{{ (r.title_vi or '')[:140] }}</td><td>{{ r.dieu }}</td><td>{{ r.n - r.pl }}</td><td>{{ r.pl or '—' }}</td>
+<td>{{ r.emb }}</td><td style='font-size:.8rem'>{% if r.source_file %}{{ r.source_file }}<br><span class='muted'>{{ r.parser_version or 'dữ liệu mẫu' }}</span>{% else %}<span class='muted'>dữ liệu mẫu ban đầu</span>{% endif %}</td></tr>
+{% endfor %}
+</table></div>
+{% endblock %}

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_pill %}
+{% set active = "/proposals" %}
+{% block title %}Đề xuất #{{ r.id }}{% endblock %}
+{% block content %}
+{% set pending = r.status == 'pending' %}
+{% set tokens = ag.get('tokens', 0) %}
+<p><a href='/proposals'>← Danh sách đề xuất</a></p><div class='eyebrow'>Đề xuất #{{ r.id }} · nghĩa vụ</div>
+<h1>{{ r.doc_code }} {{ status_pill(r.status) }}</h1>
+<p class='muted' style='font-size:.85rem'>Tạo {{ r.created_at }} bởi {{ r.created_by or '?' }} · {{ ag.get('agent', '') }} · soạn bằng {{ ag.get('draft_model', '') }}, lọc và kiểm chứng bằng {{ ag.get('filter_model', '') }} · {{ ag.get('calls', 0) }} lần gọi · {{ '{:,}'.format(tokens) if tokens is integer else tokens }} token</p>
+{% if err_msg %}<p class='err'>{{ err_msg }}</p>{% endif %}
+<div class='kpis' style='margin-bottom:12px'><div class='kpi'><b>{{ obls|length }}</b>nghĩa vụ đạt kiểm tra</div>
+<div class='kpi'><b>{{ rep.get('flagged', 0) }}</b>có ý không có căn cứ</div><div class='kpi'><b>{{ rep.get('rejected', [])|length }}</b>bị loại tự động</div>
+<div class='kpi'><b>{{ rep.get('new_fields', [])|length }}</b>đề nghị trường hồ sơ mới</div></div>
+<div class='panel' style='font-size:.9rem'><b>Cách duyệt.</b> Mỗi nghĩa vụ đặt cạnh nguyên văn căn cứ. Đọc nội dung, điều kiện áp dụng và mức phạt; ý có viền vàng là ý model kiểm chứng cho là <b>không có trong căn cứ</b>. Nghĩa vụ chưa ổn thì tick <b>Loại</b>; phần còn lại được nạp khi duyệt.</div>
+{% if pending %}<form method='post' action='/proposals/{{ r.id }}/review'><input type='hidden' name='token' value='{{ csrf_token(r.id) }}'>{% endif %}
+{% for ob in obls %}
+{% set o = ob.o %}
+{% set v = o.get('_verify') or {} %}
+{% set uns = v.get('unsupported') or [] %}
+<div class='panel' style='{{ 'border-color:var(--warn)' if uns else '' }}'>{% if pending %}<label class='c' style='float:right'><input type='checkbox' name='exclude' value='{{ o['id'] }}'> Loại</label>{% elif o['id'] in excluded %}<span class='pill no' style='float:right'>đã loại</span>{% endif %}<h3 style='margin:0 0 4px'>{{ o['id'] }} · {{ o.get('topic', '') }}
+<span class='pill'>{{ o.get('kind', '') }}{% if o.get('freq') %} · {{ o['freq'] }}{% endif %}</span></h3>
+<div class='grid' style='grid-template-columns:minmax(0,1fr) minmax(0,1fr)'><div>
+<p style='margin:.3rem 0'><b>Nghĩa vụ:</b> {{ o.get('content', '') }}</p>
+<p style='margin:.3rem 0'><b>Hành động:</b> {{ o.get('action', '') }}</p>
+<p style='margin:.3rem 0'><b>Bằng chứng:</b> {{ (o.get('evidence') or [])|join('; ') }}</p>
+<p style='margin:.3rem 0'><b>Áp dụng khi:</b> {{ o.get('applies_when')|rule_text }}</p>
+{% if o.get('calc') %}<p style='margin:.3rem 0'><b>Tính cho DN:</b> {{ o['calc'] }}</p>{% endif %}
+{% if o.get('change_note') %}<p style='margin:.3rem 0'><b>Thay đổi:</b> {{ o['change_note'] }}</p>{% endif %}
+<p style='margin:.3rem 0'><b>Mức phạt:</b></p><ul style='margin:0;font-size:.88rem'>{% for p in o.get('penalties') or [] %}<li>{{ p.get('doc', '') }} Điều {{ p.get('dieu') }}{% if p.get('khoan') %} khoản {{ p.get('khoan') }}{% endif %}{% if p.get('diem') %} điểm {{ p.get('diem') }}{% endif %}: {{ p.get('text', '') }}</li>{% else %}<li class=muted>không ghi</li>{% endfor %}</ul>
+{% for x in uns %}<p class='err' style='margin:.4rem 0;font-size:.85rem'>Không có trong căn cứ: {{ x }}</p>{% endfor %}
+{% for x in v.get('inferred') or [] %}<p class='muted' style='margin:.2rem 0;font-size:.82rem'>Suy diễn: {{ x }}</p>{% endfor %}
+</div><div style='border-left:1px solid var(--line);padding-left:12px'><p class='muted' style='margin:0 0 4px;font-size:.75rem;text-transform:uppercase'>Nguyên văn căn cứ</p>
+{% for s in ob.sources %}
+<div class='k' style='grid-template-columns:150px minmax(0,1fr)'><b>{{ s.ref|src_label }}{% for m in s.notes %}<br><span class='pill no' style='white-space:normal'>{{ m['action'] }}{% if m.get('diem') %} điểm {{ m['diem'] }}{% endif %} bởi {{ m['by']|src_label }}</span>{% endfor %}</b><p class='law' style='font-size:.85rem;{{ 'opacity:.6;' if s.old else '' }}'>{{ (s.text or '(không có nguyên văn)').split('\n', 1)[-1][:2500] }}</p></div>
+{% endfor %}
+{% for s in ob.added %}
+<div class='k' style='grid-template-columns:150px minmax(0,1fr)'><b>{{ s.ref|src_label }}<br><span class='pill ok'>nội dung mới</span></b><p class='law' style='font-size:.85rem'>{{ s.text.split('\n', 1)[-1][:3000] }}</p></div>
+{% endfor %}
+</div></div></div>
+{% endfor %}
+{% if pending %}
+<div class='panel'><h3 style='margin-top:0'>Quyết định</h3><label>Ghi chú (tùy chọn)<br><textarea name='note'></textarea></label>
+<div class='row' style='margin-top:8px'><button name='decision' value='approved'>Duyệt — nạp các nghĩa vụ không bị tick Loại</button>
+<button class='ghost' name='decision' value='rejected'>Từ chối cả đề xuất</button></div>
+<p class='muted' style='font-size:.82rem'>Duyệt chưa ghi gì vào database. Nghĩa vụ chỉ được nạp khi chạy <code>python loader.py apply</code>, và được đánh dấu là đã được bạn duyệt — lần chạy agent01 sau sẽ không ghi đè lên chúng.</p></div></form>
+{% else %}
+<div class='panel'><h3 style='margin-top:0'>Quyết định</h3><p>{{ status_vi.get(r.status, (r.status|string, ''))[0] }}{% if r.reviewed_by %} bởi <b>{{ r.reviewed_by }}</b> lúc {{ r.reviewed_at }}{% endif %}{% if excluded %} · loại {{ excluded|length }} nghĩa vụ{% endif %}</p>{% if r.review_note %}<p class='law'>{{ r.review_note }}</p>{% endif %}{% if r.apply_report %}<p class='muted' style='font-size:.85rem'>Kết quả nạp: {{ r.apply_report|dumps }}</p>{% endif %}</div>
+{% endif %}
+{% set rj = rep.get('rejected', []) %}
+{% if rj %}
+<div class='panel'><details><summary>Bị loại tự động ({{ rj|length }}) — không được nạp</summary><ul style='font-size:.88rem'>{% for x in rj %}<li><b>{{ x['obligation'].get('id', '') }}</b> {{ x['obligation'].get('content', '')[:160] }}<br><span class='err'>{{ x['errors']|join('; ') }}</span></li>{% endfor %}</ul></details></div>
+{% endif %}
+{% set nf = rep.get('new_fields', []) %}
+{% if nf %}
+<div class='panel'><details open><summary>Đề nghị thêm trường hồ sơ doanh nghiệp ({{ nf|length }})</summary><p class='muted' style='font-size:.85rem'>Model gặp điều kiện áp dụng không diễn đạt được bằng các trường hiện có. Thêm trường là việc của người, không phải của agent.</p><ul style='font-size:.88rem'>{% for x in nf %}<li><code>{{ x.get('name') }}</code> — {{ x.get('meaning', '') }} <span class='muted'>(Điều {{ x.get('dieu') }}: {{ x.get('why', '') }})</span></li>{% endfor %}</ul></details></div>
+{% endif %}
+{% set lg = rep.get('log', []) %}
+{% if lg %}
+<div class='panel'><details><summary>Nhật ký agent01 ({{ lg|length }} điều)</summary><ul style='font-size:.85rem'>{% for x in lg %}<li>{{ x }}</li>{% endfor %}</ul></details></div>
+{% endif %}
+{% endblock %}

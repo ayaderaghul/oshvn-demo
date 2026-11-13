@@ -1,10 +1,16 @@
 """Pages and the review form against a real Postgres seeded with the rows that trigger each review finding."""
-import json, threading, unittest
+import json
+import threading
+import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
 
 import support
-from support import add_document, add_proposal, basic, client, j, webapp
+from support import add_document, add_proposal, basic, client, j
+
+from app import db as dbmod
+from app import rag, security
+from app.routers import ask as ask_router
 
 BAD = "<img src=x onerror=alert(1)>"
 
@@ -30,25 +36,25 @@ def page(path, **kw):
 
 def review(pid, data, origin="http://testserver"):
     headers = basic() | ({"origin": origin} if origin else {})
-    return client().post(f"/proposals/{pid}/review", headers=headers, data={"token": webapp.csrf_token(pid), **data}, follow_redirects=False)
+    return client().post(f"/proposals/{pid}/review", headers=headers, data={"token": security.csrf_token(pid), **data}, follow_redirects=False)
 
 
 class FreshIndex(unittest.TestCase):
     def test_a_clause_changed_in_place_is_searched_with_its_new_text(self):
-        with webapp.db() as conn:
-            webapp.INDEX.ensure(conn)
+        with dbmod.db() as conn:
+            rag.INDEX.ensure(conn)
         run = db.sql("INSERT INTO load_runs(kind, status) VALUES ('documents','applied') RETURNING id")[0][0]
         db.sql("""UPDATE chunks SET text = text || ' Kiểm định thang máy.', load_run_id=%s
                   WHERE id = (SELECT min(id) FROM chunks WHERE document_id=%s)""", (run, DOC_B))
-        with webapp.db() as conn:
-            webapp.INDEX.ensure(conn)
-        self.assertTrue(any("thang máy" in row[3] for _, row in webapp.INDEX.search("thang máy")))
+        with dbmod.db() as conn:
+            rag.INDEX.ensure(conn)
+        self.assertTrue(any("thang máy" in row[3] for _, row in rag.INDEX.search("thang máy")))
 
 
 class AskFiltersBeforeRanking(unittest.TestCase):
     def test_a_document_outside_the_global_top_hits_is_still_found(self):
         r = client().post("/ask", headers=basic() | {"origin": "http://testserver"},
-                          data={"q": "huấn luyện an toàn", "doc": "2/2026/NĐ-CP", "token": webapp.csrf_token("ask")})
+                          data={"q": "huấn luyện an toàn", "doc": "2/2026/NĐ-CP", "token": security.csrf_token("ask")})
         self.assertEqual(r.status_code, 200)
         self.assertIn("mới tuyển dụng", r.text)
         self.assertNotIn("Không tìm thấy khoản nào", r.text)
@@ -56,7 +62,7 @@ class AskFiltersBeforeRanking(unittest.TestCase):
 
 class AskNeedsPost(unittest.TestCase):
     def test_get_with_a_question_does_not_call_the_model(self):
-        with mock.patch.object(webapp, "ask_claude", return_value=(None, "x")) as called:
+        with mock.patch.object(ask_router, "ask_claude", return_value=(None, "x")) as called:
             r = page("/ask?q=huấn+luyện")
         self.assertEqual(r.status_code, 200)
         called.assert_not_called()
@@ -66,9 +72,9 @@ class AskNeedsPost(unittest.TestCase):
         self.assertEqual(r.status_code, 403)
 
     def test_post_with_the_token_calls_the_model(self):
-        with mock.patch.object(webapp, "ask_claude", return_value=(None, "đã gọi")) as called:
+        with mock.patch.object(ask_router, "ask_claude", return_value=(None, "đã gọi")) as called:
             r = client().post("/ask", headers=basic() | {"origin": "http://testserver"},
-                              data={"q": "huấn luyện", "token": webapp.csrf_token("ask")})
+                              data={"q": "huấn luyện", "token": security.csrf_token("ask")})
         self.assertEqual(r.status_code, 200)
         called.assert_called_once()
 
@@ -171,9 +177,9 @@ class VectorFallback(unittest.TestCase):
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         env = {"VOYAGE_API_KEY": "k", "VOYAGE_API_BASE": f"http://127.0.0.1:{srv.server_port}"}
         try:
-            with mock.patch.dict("os.environ", env), mock.patch.object(webapp, "ask_claude", return_value=(None, "x")):
+            with mock.patch.dict("os.environ", env), mock.patch.object(ask_router, "ask_claude", return_value=(None, "x")):
                 r = client().post("/ask", headers=basic() | {"origin": "http://testserver"},
-                                  data={"q": "huấn luyện", "token": webapp.csrf_token("ask")})
+                                  data={"q": "huấn luyện", "token": security.csrf_token("ask")})
         finally:
             srv.shutdown()
             db.sql("UPDATE chunks SET embedding=NULL, embedding_model=NULL WHERE document_id=%s", (DOC_B,))

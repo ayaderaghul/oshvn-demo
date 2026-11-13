@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% set active = "/search" %}
+{% block title %}Tìm kiếm{% endblock %}
+{% block content %}
+<h1>Tìm kiếm từ khóa</h1><p class='muted'>Tìm trên toàn bộ khoản luật, không phân biệt dấu. Tìm theo nghĩa (vector) sẽ có khi tạo embedding.</p>
+<form class='row panel' method='get'><input name='q' value='{{ q }}' style='flex:1;min-width:220px' placeholder='ví dụ: khám sức khỏe định kỳ'><button>Tìm</button></form>
+{% if q.strip() %}
+<div class='panel'><p class='muted' style='margin:0'>{{ hits|length }} kết quả</p>
+{% for h in hits %}
+{% set loc = h.locator %}
+{% set ref = loc.get('ref') or ((loc.get('label') or 'Điều ' ~ loc.get('dieu')) ~ ((', khoản ' ~ loc.get('khoan')) if loc.get('khoan') else '')) %}
+<div class='art'><a href='/doc/{{ h.id }}#d{{ loc.get('dieu') }}'><b>{{ h.number }} · {{ ref }}</b></a> <span class='muted'>{{ loc.get('dieu_title') or '' }}</span><p class='law' style='font-size:.92rem'>{{ h.snip|mark }}</p></div>
+{% endfor %}
+</div>
+{% endif %}
+{% endblock %}

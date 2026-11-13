@@ -1,0 +1,6 @@
+{% set nav = [('/', 'Văn bản'), ('/ask', 'Hỏi đáp'), ('/search', 'Tìm kiếm'), ('/obligations', 'Nghĩa vụ & rule engine'), ('/proposals', 'Chờ duyệt'), ('/runs', 'Nhật ký nạp')] %}
+<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}{% endblock %} · OSHVN demo</title><style>{{ css }}</style></head><body><div class="wrap">
+<div class="eyebrow">OSHVN · bản demo dữ liệu từ Neon</div><nav>{% for href, label in nav %}<a href="{{ href }}" class="{{ 'on' if href == active else '' }}">{{ label|safe }}</a>{% endfor %}</nav>{% block content %}{% endblock %}
+<p class="muted" style="font-size:.8rem;margin-top:24px">Dữ liệu luật do bộ tách tự động; nghĩa vụ là bản nháp chưa được chuyên gia OSHVN duyệt.</p>
+</div></body></html>
