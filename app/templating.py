@@ -16,4 +16,4 @@ templates.env.globals |= {
     "status_vi": views.STATUS_VI, "verdict_vi": views.VERDICT_VI,
     "csrf_token": csrf_token, "word_diff": views.word_diff,
 }
-templates.env.filters |= {"nice": nice, "penalty_label": penalty_label, "rule_text": rule_text, "src_label": src_label}
+templates.env.filters |= {"mark": views.mark, "nice": nice, "penalty_label": penalty_label, "rule_text": rule_text, "src_label": src_label}

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_pill, counts, agent_cell %}
+{% set active = "/" %}
+{% block title %}{{ d.number }}{% endblock %}
+{% block content %}
+<h1>{{ d.number }}</h1><p class='muted' style='margin:0 0 8px'>{{ d.title_vi or '' }}</p>
+<p>{% for c in d.check_report or [] %}<span class='pill {{ 'ok' if c['ok'] else 'no' }}' title='{{ c['detail'] }}'>{{ 'ĐẠT' if c['ok'] else 'LỖI' }} · {{ c['name'] }}</span> {% endfor %}</p>
+{% if hist %}
+<div class='panel'><details><summary>Lịch sử nạp và duyệt ({{ hist|length }} đề xuất) — nhận xét của agent và người duyệt</summary>
+<div class='scroll'><table><tr><th>#</th><th>Trạng thái</th><th>File</th><th>Thay đổi</th><th style='min-width:280px'>Nhận xét của agent</th><th>Người duyệt</th></tr>
+{% for h in hist %}
+<tr><td><a href='/proposals/{{ h.id }}'>#{{ h.id }}</a></td><td>{{ status_pill(h.status) }}</td>
+<td style='font-size:.82rem'>{{ h.file_name or '' }}<br><span class='muted'>{{ h.created_at }}</span></td>
+<td style='font-size:.82rem'>{{ counts(h.chunks) }}</td>
+{{ agent_cell(h.verdict, h.comment, h.route, full=true) }}
+<td style='font-size:.82rem'>{{ h.reviewed_by or '—' }}<br><span class='muted'>{{ h.reviewed_at or '' }}</span>{% if h.review_note %}<br><i>{{ h.review_note }}</i>{% endif %}</td></tr>
+{% endfor %}
+</table></div></details></div>
+{% endif %}
+<div class='grid'><div class='panel toc'>
+{% set ns = namespace(last=none) %}
+{% for a in arts %}
+{% set group = 'Phụ lục' if a.loc.get('kind') == 'appendix_item' else a.loc.get('chuong') %}
+{% if group != ns.last %}
+{% set ns.last = group %}
+{% if group == 'Phụ lục' %}<h4>Phụ lục</h4>{% elif group %}<h4>Chương {{ group }} · {{ a.loc.get('chuong_title') or '' }}</h4>{% endif %}
+{% endif %}
+<a href='#d{{ a.key }}'>{{ a.loc.get('label') or 'Đ.' ~ a.key }} {{ a.loc.get('dieu_title') or '' }}</a>
+{% endfor %}
+</div><div class='panel'>
+{% for a in arts %}
+<div class='art' id='d{{ a.key }}'><h3>{{ a.loc.get('label') or 'Điều ' ~ a.key }}. {{ a.loc.get('dieu_title') or '' }}</h3>
+{% for pl, t in a.parts %}
+{% set tag = (('Mục' if pl.get('kind') == 'appendix_item' else 'Khoản') ~ ' ' ~ pl['khoan']) if pl.get('khoan') else ('Mở đầu' if pl.get('kind') == 'lead' else 'Đoạn') %}
+<div class='k'><b>{{ tag }}</b><p class='law'>{{ t }}</p></div>
+{% endfor %}
+</div>
+{% else %}
+<p class=muted>Chưa có khoản nào.</p>
+{% endfor %}
+</div></div>
+{% endblock %}

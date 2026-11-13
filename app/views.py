@@ -2,6 +2,7 @@ import difflib, html, re
 from pathlib import Path
 
 from fastapi.responses import HTMLResponse
+from markupsafe import Markup
 
 E = html.escape
 
@@ -34,6 +35,10 @@ def status_pill(status):
 def counts(c):
     c = c if isinstance(c, dict) else {}
     return E(f"{c.get('new', 0)} mới / {c.get('changed', 0)} đổi / {c.get('retired', 0)} ngừng")
+
+
+def mark(snip):
+    return Markup(E(snip).replace("&lt;mark&gt;", "<mark>").replace("&lt;/mark&gt;", "</mark>"))
 
 
 def word_diff(old, new):
