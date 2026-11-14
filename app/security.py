@@ -15,7 +15,23 @@ security = HTTPBasic(auto_error=False)
 PUBLIC_PATHS = {"/healthz"}
 LOGIN_FAILURES_ALLOWED = 10          # per client address, within LOGIN_WINDOW seconds
 LOGIN_WINDOW = 900
+LOGIN_TRACKED_MAX = 10_000           # about 9 MB of counters at most
 FAILED_LOGINS, _login_lock = {}, threading.Lock()
+_last_sweep = [0.0]
+
+
+def _remember_failure(key, now):
+    """Under _login_lock. Counters are otherwise trimmed only when their own client returns, so without the sweep
+    and the size limit, addresses that never come back would stay in memory until a restart."""
+    if now - _last_sweep[0] > 60:
+        _last_sweep[0] = now
+        for k in [k for k, f in FAILED_LOGINS.items() if now - f[-1] > LOGIN_WINDOW]:
+            del FAILED_LOGINS[k]
+    if key not in FAILED_LOGINS:
+        while len(FAILED_LOGINS) >= LOGIN_TRACKED_MAX:
+            del FAILED_LOGINS[next(iter(FAILED_LOGINS))]
+        FAILED_LOGINS[key] = deque()
+    FAILED_LOGINS[key].append(now)
 
 
 def reviewer_name(raw):
@@ -51,7 +67,7 @@ def auth(request: Request, c: HTTPBasicCredentials | None = Depends(security)):
     pw = os.environ.get("APP_PASSWORD")
     if not pw or c is None or not secrets.compare_digest(c.password.encode(), pw.encode()):
         if c is not None:
-            with _login_lock: FAILED_LOGINS.setdefault(key, deque()).append(now)
+            with _login_lock: _remember_failure(key, now)
         raise HTTPException(401, "Sai mật khẩu", headers={"WWW-Authenticate": "Basic"})
     with _login_lock: FAILED_LOGINS.pop(key, None)
     return reviewer_name(c.username)

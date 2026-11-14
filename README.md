@@ -6,6 +6,7 @@ Trang xem dữ liệu trong Neon, chỉ đọc. FastAPI một file, chạy trên
 - Biến môi trường (đặt trong Render dashboard, không ghi vào code):
   - `DATABASE_URL`: chuỗi kết nối Neon của role `oshvn_review` (từ 2026-11-11): đọc mọi bảng qua `oshvn_readonly`, chỉ ghi qua `review_proposal()` và `review_proposal_items()`. Quyền của role nằm ở `oshvn_loader/migrations/006_review_role.sql`.
   - `APP_PASSWORD`: mật khẩu xem trang (tên đăng nhập gõ gì cũng được)
+  - `SENTRY_DSN` (tùy chọn): khi có, lỗi 500 được gửi tới Sentry kèm stack trace. Báo cáo không chứa mật khẩu, tên đăng nhập, địa chỉ IP, câu hỏi hay dữ liệu form (`app/errors.py`). Không đặt thì không gửi gì.
 
 Chạy thử trên máy: `pip install -r requirements.txt`, đặt hai biến trên, rồi `uvicorn app.main:app --reload`.
 
