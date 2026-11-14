@@ -16,6 +16,7 @@ PASSWORD = "test-password"
 os.environ["APP_PASSWORD"] = PASSWORD
 os.environ.pop("ANTHROPIC_API_KEY", None)
 os.environ.pop("VOYAGE_API_KEY", None)
+os.environ.pop("SENTRY_DSN", None)
 
 from fastapi.testclient import TestClient  # noqa: E402
 
