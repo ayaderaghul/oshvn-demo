@@ -53,6 +53,8 @@ The feature map in `features/` has one recipe per feature. Read `features/README
 - `heap-A…D.snapshot`: `tracemalloc` snapshots after warm-up, after normal use, and after each wrong-password phase. Compare two with `tracemalloc.Snapshot.load(...).compare_to(other, "lineno")`.
 - `report.txt`: latency, connections, and queries per route; the share spent connecting, querying, rendering, and calling models; heap totals; and growth by source line.
 
+To browse two snapshots instead of reading text, run `.venv/Scripts/python .claude/skills/verify/scripts/heapview.py OLD.snapshot NEW.snapshot`. It writes one HTML page next to the newer snapshot: a sortable table of growth by source line, a filter, and the call paths behind each line. The source text on the page is read from the files as they are now.
+
 Read it this way. Heap from A to B must stay flat, because normal use keeps no state per request. From C to D it must stay flat as well, because `FAILED_LOGINS` is capped at `LOGIN_TRACKED_MAX`. Times come from a local database, so connection cost on Neon is higher.
 
 ## Evidence
